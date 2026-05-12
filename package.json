@@ -1,0 +1,17 @@
+{
+  "name": "phywise",
+  "private": true,
+  "packageManager": "pnpm@10.0.0",
+  "scripts": {
+    "dev": "turbo dev",
+    "dev:web": "pnpm --filter @phywise/web dev",
+    "dev:api": "python -m uvicorn phywise_api.main:app --app-dir apps/api/src --reload --port 8000",
+    "build": "turbo build",
+    "typecheck": "turbo typecheck"
+  },
+  "devDependencies": {
+    "turbo": "^2.1.0",
+    "typescript": "^5.7.0"
+  }
+}
+

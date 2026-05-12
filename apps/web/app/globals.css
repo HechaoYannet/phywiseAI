@@ -1,0 +1,394 @@
+:root {
+  --ink: #0d1321;
+  --slate: #44536f;
+  --paper: #f6f4ee;
+  --mist: #dfe7f5;
+  --cobalt: #2456d3;
+  --amber: #ed9f2f;
+  --pine: #2b6e5b;
+  --surface: rgba(255, 255, 255, 0.84);
+  --shadow: 0 24px 80px rgba(13, 19, 33, 0.12);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  background:
+    radial-gradient(circle at top left, rgba(36, 86, 211, 0.12), transparent 30%),
+    radial-gradient(circle at 80% 20%, rgba(237, 159, 47, 0.16), transparent 24%),
+    linear-gradient(180deg, #f3f0e8 0%, #f8fafc 55%, #eef4ff 100%);
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+.page-shell,
+.workspace-page,
+.docs-shell {
+  width: min(1200px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 32px 0 64px;
+}
+
+.hero,
+.grid-section,
+.workspace-grid,
+.docs-grid {
+  display: grid;
+  gap: 20px;
+}
+
+.hero {
+  grid-template-columns: 1.5fr 1fr;
+  align-items: stretch;
+  padding-top: 24px;
+}
+
+.hero-copy,
+.hero-panel,
+.info-card,
+.workspace-card,
+.doc-card,
+.roadmap-strip,
+.workspace-badge,
+.subquestion-card {
+  border: 1px solid rgba(68, 83, 111, 0.16);
+  border-radius: 28px;
+  background: var(--surface);
+  backdrop-filter: blur(14px);
+  box-shadow: var(--shadow);
+}
+
+.hero-copy,
+.hero-panel,
+.info-card,
+.workspace-card,
+.doc-card,
+.roadmap-strip {
+  padding: 28px;
+}
+
+.hero-copy h1,
+.docs-header h1,
+.workspace-header h1 {
+  margin: 10px 0 14px;
+  font-family: "Space Grotesk", "Segoe UI", sans-serif;
+  font-size: clamp(2.4rem, 4vw, 4.4rem);
+  line-height: 0.98;
+  letter-spacing: -0.05em;
+}
+
+.hero-text,
+.workspace-header p,
+.docs-header p {
+  max-width: 680px;
+  color: var(--slate);
+  font-size: 1.04rem;
+  line-height: 1.7;
+}
+
+.eyebrow {
+  display: inline-block;
+  color: var(--cobalt);
+  font-size: 0.82rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero-actions {
+  display: flex;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.primary-link,
+.secondary-link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;
+  padding: 0 18px;
+  border-radius: 999px;
+  font-weight: 700;
+}
+
+.primary-link {
+  color: white;
+  background: linear-gradient(135deg, var(--cobalt), #16389d);
+}
+
+.secondary-link {
+  color: var(--ink);
+  background: rgba(223, 231, 245, 0.9);
+}
+
+.panel-heading {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.panel-heading span,
+.status-tag,
+.node-kind {
+  color: var(--slate);
+  font-size: 0.84rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.compact-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+  color: var(--slate);
+  line-height: 1.6;
+}
+
+.grid-section {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 20px;
+}
+
+.roadmap-strip {
+  display: grid;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.roadmap-strip h2,
+.info-card h2,
+.workspace-card h2,
+.doc-card h2,
+.subquestion-section h2 {
+  margin: 0 0 14px;
+  font-size: 1.15rem;
+}
+
+.docs-header {
+  margin-bottom: 24px;
+}
+
+.docs-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.doc-card p {
+  color: var(--slate);
+  line-height: 1.6;
+}
+
+.doc-card code {
+  display: inline-flex;
+  align-items: center;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 999px;
+  color: var(--ink);
+  background: rgba(223, 231, 245, 0.9);
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.9rem;
+}
+
+.workspace-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+
+.workspace-badge {
+  min-width: 180px;
+  padding: 20px;
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-badge span {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 1.1rem;
+}
+
+.workspace-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-top: 24px;
+}
+
+.board-card {
+  grid-column: span 2;
+}
+
+.card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.status-tag {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(223, 231, 245, 0.9);
+}
+
+.stem {
+  color: var(--ink);
+  line-height: 1.7;
+}
+
+.chip-row {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  color: white;
+  background: linear-gradient(135deg, var(--pine), #1d4f41);
+  font-size: 0.9rem;
+}
+
+.muted-chip {
+  background: linear-gradient(135deg, var(--amber), #c17b18);
+}
+
+.detail-block {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(68, 83, 111, 0.14);
+}
+
+.detail-block p {
+  margin: 8px 0 0;
+  color: var(--slate);
+  line-height: 1.6;
+}
+
+.board-list,
+.subquestion-list {
+  display: grid;
+  gap: 14px;
+}
+
+.board-list {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.board-node,
+.subquestion-card {
+  padding: 16px;
+  border-radius: 22px;
+  background: rgba(246, 244, 238, 0.92);
+}
+
+.board-node strong {
+  display: block;
+  margin-top: 10px;
+  line-height: 1.5;
+}
+
+.kind-equation_block {
+  background: rgba(223, 231, 245, 0.84);
+}
+
+.kind-condition_card {
+  background: rgba(255, 247, 231, 0.95);
+}
+
+.kind-hint_card {
+  background: rgba(235, 249, 243, 0.95);
+}
+
+.kind-simulation_object {
+  background: rgba(235, 241, 255, 0.95);
+}
+
+.subquestion-section {
+  margin-top: 28px;
+}
+
+.subquestion-list {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.subquestion-card {
+  display: grid;
+  gap: 10px;
+}
+
+.subquestion-card span {
+  color: var(--slate);
+  font-size: 0.94rem;
+}
+
+@media (max-width: 960px) {
+  .hero,
+  .grid-section,
+  .workspace-grid,
+  .docs-grid,
+  .subquestion-list {
+    grid-template-columns: 1fr;
+  }
+
+  .board-card {
+    grid-column: span 1;
+  }
+
+  .board-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-header {
+    flex-direction: column;
+  }
+}
+
+@media (max-width: 640px) {
+  .page-shell,
+  .workspace-page,
+  .docs-shell {
+    width: min(100% - 20px, 1200px);
+    padding-top: 20px;
+  }
+
+  .hero-copy,
+  .hero-panel,
+  .info-card,
+  .workspace-card,
+  .doc-card,
+  .roadmap-strip {
+    padding: 20px;
+  }
+
+  .hero-actions {
+    flex-direction: column;
+  }
+
+  .board-list {
+    grid-template-columns: 1fr;
+  }
+}

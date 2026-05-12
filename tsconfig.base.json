@@ -1,0 +1,21 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["DOM", "DOM.Iterable", "ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "resolveJsonModule": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@phywise/contracts": ["packages/contracts/src/index.ts"],
+      "@phywise/domain": ["packages/domain/src/index.ts"],
+      "@phywise/whiteboard-schema": ["packages/whiteboard-schema/src/index.ts"],
+      "@phywise/design-tokens": ["packages/design-tokens/src/index.ts"]
+    }
+  }
+}
+
