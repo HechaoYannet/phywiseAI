@@ -5,6 +5,7 @@ build/
 .turbo/
 .cache/
 coverage/
+*.tsbuildinfo
 .venv/
 __pycache__/
 *.pyc
@@ -18,4 +19,3 @@ apps/api/.venv/
 storage/
 tmp/
 .DS_Store
-

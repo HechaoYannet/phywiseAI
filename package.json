@@ -3,10 +3,15 @@
   "private": true,
   "packageManager": "pnpm@10.0.0",
   "scripts": {
+    "setup:node": "pnpm install",
+    "setup:python": "python -m pip install -e \"apps/api[dev]\"",
+    "check": "pnpm typecheck && python -m pytest apps/api/tests -q",
+    "test:api": "python -m pytest apps/api/tests -q",
     "dev": "turbo dev",
     "dev:web": "pnpm --filter @phywise/web dev",
     "dev:api": "python -m uvicorn phywise_api.main:app --app-dir apps/api/src --reload --port 8000",
     "build": "turbo build",
+    "build:web": "pnpm --filter @phywise/web build",
     "typecheck": "turbo typecheck"
   },
   "devDependencies": {
@@ -14,4 +19,3 @@
     "typescript": "^5.7.0"
   }
 }
-

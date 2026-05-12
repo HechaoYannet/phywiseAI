@@ -19,6 +19,9 @@ and teaching-grade simulations in a single workflow.
 Read [docs/README.md](/E:/otherProject/phywise/docs/README.md) first, then follow
 [docs/04-engineering/quickstart.md](/E:/otherProject/phywise/docs/04-engineering/quickstart.md).
 
+Python environment management defaults to `conda`, and project dependencies are
+installed with `pip` inside that environment.
+
 ## Product Direction
 
 The initial implementation in this repository focuses on:
@@ -27,4 +30,3 @@ The initial implementation in this repository focuses on:
 - A structured `TutorTurn` protocol instead of free-form chat.
 - A teaching-grade `SimulationScene` contract for future physics modules.
 - Documentation as a first-class deliverable under `docs/`.
-
