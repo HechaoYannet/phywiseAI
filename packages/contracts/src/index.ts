@@ -6,6 +6,8 @@ import type {
 
 export type SourceAssetKind = "pdf" | "image" | "markdown" | "latex" | "photo" | "other";
 export type GradeBand = "middle_school" | "high_school" | "cross_stage";
+export type ParseProvider = "manual_text" | "paddleocr" | "tencent_ocr" | "hybrid";
+export type ParseJobStatus = "queued" | "processing" | "completed" | "failed";
 export type KnowledgeLinkKind =
   | "concept"
   | "formula"
@@ -19,9 +21,48 @@ export interface SourceAsset {
   filename: string;
   mime_type: string;
   bytes: number;
-  object_key: string;
+  object_key?: string;
+  storage_key: string;
+  sha256?: string;
   page_count?: number;
+  preview_pages?: PageRegion[];
+  source_provider?: "upload" | "manual_text";
   created_at: string;
+}
+
+export interface ProviderTraceEntry {
+  provider: ParseProvider;
+  status: "used" | "skipped" | "unavailable" | "fallback";
+  detail: string;
+}
+
+export interface PageRegion {
+  id: string;
+  page: number;
+  label: string;
+  preview_key: string;
+  width: number;
+  height: number;
+}
+
+export interface DiagramRegion {
+  id: string;
+  page: number;
+  label: string;
+  preview_key: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  diagram_type: "force" | "circuit" | "optics" | "generic";
+}
+
+export interface ConfirmationItem {
+  id: string;
+  field: "stem" | "subquestion" | "condition" | "diagram";
+  label: string;
+  reason: string;
+  suggested_value?: string;
 }
 
 export interface KnowledgeLink {
@@ -76,9 +117,28 @@ export interface ProblemParseResult {
   conditions: ProblemCondition[];
   diagram_entities: DiagramEntity[];
   knowledge_links: KnowledgeLink[];
+  provider_trace: ProviderTraceEntry[];
+  normalized_text?: string;
+  page_regions: PageRegion[];
+  diagram_regions: DiagramRegion[];
+  confirmation_items: ConfirmationItem[];
   confidence: number;
   needs_confirmation: boolean;
   warnings: string[];
+  created_at?: string;
+}
+
+export interface ParseJob {
+  id: string;
+  source_asset_id: string;
+  provider_strategy: ParseProvider;
+  status: ParseJobStatus;
+  progress: number;
+  error_code?: string;
+  error_message?: string;
+  result_problem_id?: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SimulationObject {
@@ -126,6 +186,22 @@ export interface MasteryTrace {
   updated_at: string;
 }
 
+export interface BoardPatch {
+  upsert_nodes: WhiteboardNode[];
+  remove_node_ids: string[];
+  upsert_edges: WhiteboardEdge[];
+  remove_edge_ids: string[];
+}
+
+export interface BoardSuggestion {
+  id: string;
+  kind: "diagram_rebuild" | "force_completion" | "equation_hint" | "next_step" | "label_fix";
+  target_node_ids: string[];
+  patch: BoardPatch;
+  reason: string;
+  status: "pending" | "accepted" | "rejected";
+}
+
 export interface WorkspaceDocument {
   id: string;
   title: string;
@@ -141,8 +217,12 @@ export interface WorkspaceDocument {
   selection_state: {
     selected_node_ids: string[];
     focused_subquestion_id?: string;
+    active_tool?: string;
   };
   mastery: MasteryTrace;
+  suggestions: BoardSuggestion[];
+  updated_at?: string;
+  revision_id?: string;
 }
 
 export interface TutorTurn {
@@ -185,10 +265,30 @@ export interface Assignment {
   created_at: string;
 }
 
+export interface ParseOverrides {
+  stem?: string;
+  subquestions?: ProblemSubquestion[];
+  conditions?: ProblemCondition[];
+}
+
 export interface CreateWorkspaceInput {
   title: string;
   source_asset_id?: string;
   problem_id?: string;
+  parse_overrides?: ParseOverrides;
+}
+
+export interface CreateParseJobInput {
+  source_asset_id: string;
+  provider_strategy?: ParseProvider;
+}
+
+export interface AnalyzeSourceInput {
+  source_asset_id?: string;
+}
+
+export interface AnalyzeBoardInput {
+  selected_node_ids: string[];
 }
 
 export interface TutorTurnInput {
@@ -207,3 +307,12 @@ export interface RebuildSimulationInput {
   }>;
 }
 
+export interface UpdateWorkspaceInput {
+  document: WorkspaceDocument;
+}
+
+export interface WorkspaceRevision {
+  id: string;
+  workspace_id: string;
+  created_at: string;
+}

@@ -1,5 +1,6 @@
 import type {
   Assignment,
+  BoardSuggestion,
   KnowledgeLink,
   ProblemParseResult,
   SimulationScene,
@@ -44,7 +45,11 @@ export function createDemoSourceAsset(): SourceAsset {
     filename: "inclined-plane-problem.png",
     mime_type: "image/png",
     bytes: 348120,
+    storage_key: "demo/inclined-plane-problem.png",
     object_key: "demo/inclined-plane-problem.png",
+    sha256: "demo-sha256",
+    preview_pages: [],
+    source_provider: "upload",
     created_at: NOW
   };
 }
@@ -111,10 +116,62 @@ export function createDemoProblemParseResult(): ProblemParseResult {
       }
     ],
     knowledge_links: foundationalKnowledgeLinks,
+    provider_trace: [
+      {
+        provider: "manual_text",
+        status: "used",
+        detail: "demo fixture"
+      }
+    ],
+    normalized_text:
+      "质量为 m 的物块静止在倾角为 theta 的粗糙斜面上。已知斜面对物块的动摩擦因数为 mu，求物块所受摩擦力的大小，并判断其方向。",
+    page_regions: [],
+    diagram_regions: [],
+    confirmation_items: [],
     confidence: 0.91,
     needs_confirmation: false,
-    warnings: []
+    warnings: [],
+    created_at: NOW
   };
+}
+
+export function createDemoSuggestions(): BoardSuggestion[] {
+  return [
+    {
+      id: "suggestion-demo-1",
+      kind: "force_completion",
+      target_node_ids: ["body-node-1"],
+      patch: {
+        upsert_nodes: [
+          {
+            id: "force-node-1",
+            kind: "force_arrow",
+            rect: { x: 540, y: 258, w: 120, h: 18, rotation: 90 },
+            payload: {
+              label: "G",
+              magnitude_text: "mg",
+              direction_deg: 90,
+              target_node_id: "body-node-1"
+            },
+            anchors: [
+              { id: "base", x: 0, y: 0.5 },
+              { id: "tip", x: 1, y: 0.5 }
+            ],
+            layer: "ai",
+            z_index: 5,
+            locked: false,
+            semantic_role: "gravity",
+            source_refs: ["asset-demo-001"]
+          }
+        ],
+        remove_node_ids: [],
+        upsert_edges: [],
+        remove_edge_ids: []
+      },
+      reason: "题目是静止斜面受力分析，通常先补全重力、支持力和摩擦力方向判断。",
+      status: "pending"
+    }
+  ];
 }
 
 export function createDemoWorkspace(): WorkspaceDocument {
@@ -125,50 +182,91 @@ export function createDemoWorkspace(): WorkspaceDocument {
     problem_id: "problem-demo-001",
     whiteboard_nodes: [
       {
-        id: "cond-node-1",
+        id: "source-node-1",
+        kind: "source_image",
+        rect: { x: 40, y: 40, w: 300, h: 220 },
+        payload: {
+          source_asset_id: "asset-demo-001",
+          preview_key: "demo/inclined-plane-problem.png",
+          alt: "斜面静止题图",
+          caption: "原题图"
+        },
+        anchors: [],
+        layer: "source",
+        z_index: 1,
+        locked: false,
+        semantic_role: "problem-source",
+        source_refs: ["asset-demo-001"]
+      },
+      {
+        id: "body-node-1",
+        kind: "physics_body",
+        rect: { x: 480, y: 250, w: 120, h: 84 },
+        payload: {
+          label: "物块",
+          body_shape: "block",
+          notes: "静止"
+        },
+        anchors: [
+          { id: "center", x: 0.5, y: 0.5, label: "中心" }
+        ],
+        layer: "student",
+        z_index: 3,
+        locked: false,
+        semantic_role: "main-body",
+        source_refs: ["asset-demo-001"]
+      },
+      {
+        id: "surface-node-1",
+        kind: "surface_line",
+        rect: { x: 420, y: 360, w: 240, h: 14, rotation: -18 },
+        payload: {
+          label: "斜面",
+          angle_text: "theta",
+          surface_kind: "plane"
+        },
+        anchors: [],
+        layer: "student",
+        z_index: 2,
+        locked: false,
+        semantic_role: "inclined-plane",
+        source_refs: ["asset-demo-001"]
+      },
+      {
+        id: "condition-node-1",
         kind: "condition_card",
-        rect: { x: 36, y: 32, w: 220, h: 110 },
+        rect: { x: 820, y: 80, w: 260, h: 132 },
         payload: {
           label: "已知状态",
-          value: "物块静止在粗糙斜面上",
+          value: "静止在粗糙斜面上",
           source: "ocr",
           confidence: 0.93
-        }
+        },
+        anchors: [],
+        layer: "student",
+        z_index: 4,
+        locked: false,
+        semantic_role: "known-condition",
+        source_refs: ["asset-demo-001"]
       },
       {
-        id: "eq-node-1",
-        kind: "equation_block",
-        rect: { x: 320, y: 180, w: 280, h: 140 },
+        id: "formula-node-1",
+        kind: "formula_block",
+        rect: { x: 820, y: 250, w: 300, h: 140 },
         payload: {
           latex: "\\sum F_{\\parallel}=0",
-          markdown: "先沿斜面方向列平衡关系。",
+          explanation: "先沿斜面方向列平衡关系。",
           status: "draft"
-        }
-      },
-      {
-        id: "hint-node-1",
-        kind: "hint_card",
-        rect: { x: 640, y: 48, w: 260, h: 120 },
-        payload: {
-          title: "引导",
-          hint: "先判断物块有没有沿斜面向下滑动的趋势，再决定摩擦力方向。",
-          level: 1
-        }
-      },
-      {
-        id: "sim-node-1",
-        kind: "simulation_object",
-        rect: { x: 640, y: 240, w: 260, h: 180 },
-        payload: {
-          simulation_object_id: "sim-object-1",
-          title: "斜面示意",
-          module: "forces"
-        }
+        },
+        anchors: [],
+        layer: "student",
+        z_index: 4,
+        locked: false,
+        semantic_role: "derivation",
+        source_refs: ["asset-demo-001"]
       }
     ],
-    whiteboard_edges: [
-      { id: "edge-1", from: "cond-node-1", to: "eq-node-1", label: "已知条件" }
-    ],
+    whiteboard_edges: [],
     viewport: {
       x: 0,
       y: 0,
@@ -180,14 +278,15 @@ export function createDemoWorkspace(): WorkspaceDocument {
     simulation_bindings: [
       {
         id: "binding-1",
-        source_node_id: "sim-node-1",
+        source_node_id: "body-node-1",
         target_object_id: "sim-object-1",
         property: "tilt_angle"
       }
     ],
     selection_state: {
-      selected_node_ids: ["eq-node-1"],
-      focused_subquestion_id: "subq-1"
+      selected_node_ids: ["formula-node-1"],
+      focused_subquestion_id: "subq-1",
+      active_tool: "select"
     },
     mastery: {
       concept_states: [
@@ -204,7 +303,10 @@ export function createDemoWorkspace(): WorkspaceDocument {
       ],
       misconceptions: ["misread-equilibrium"],
       updated_at: NOW
-    }
+    },
+    suggestions: createDemoSuggestions(),
+    updated_at: NOW,
+    revision_id: "revision-demo-001"
   };
 }
 
@@ -235,7 +337,7 @@ export function createDemoSimulationScene(): SimulationScene {
     bindings: [
       {
         id: "binding-1",
-        source_node_id: "sim-node-1",
+        source_node_id: "body-node-1",
         target_object_id: "sim-object-1",
         property: "angle_deg"
       }
@@ -274,4 +376,3 @@ export function createDemoAssignment(): Assignment {
 export function isLowConfidenceParse(confidence: number): boolean {
   return confidence < 0.8;
 }
-

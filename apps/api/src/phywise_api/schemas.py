@@ -2,7 +2,42 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class PageRegion(BaseModel):
+    id: str
+    page: int
+    label: str
+    preview_key: str
+    width: int
+    height: int
+
+
+class DiagramRegion(BaseModel):
+    id: str
+    page: int
+    label: str
+    preview_key: str
+    x: float
+    y: float
+    w: float
+    h: float
+    diagram_type: Literal["force", "circuit", "optics", "generic"]
+
+
+class ProviderTraceEntry(BaseModel):
+    provider: Literal["manual_text", "paddleocr", "tencent_ocr", "hybrid"]
+    status: Literal["used", "skipped", "unavailable", "fallback"]
+    detail: str
+
+
+class ConfirmationItem(BaseModel):
+    id: str
+    field: Literal["stem", "subquestion", "condition", "diagram"]
+    label: str
+    reason: str
+    suggested_value: str | None = None
 
 
 class SourceAsset(BaseModel):
@@ -11,8 +46,12 @@ class SourceAsset(BaseModel):
     filename: str
     mime_type: str
     bytes: int
-    object_key: str
+    object_key: str | None = None
+    storage_key: str
+    sha256: str | None = None
     page_count: int | None = None
+    preview_pages: list[PageRegion] = Field(default_factory=list)
+    source_provider: Literal["upload", "manual_text"] = "upload"
     created_at: str
 
 
@@ -69,9 +108,28 @@ class ProblemParseResult(BaseModel):
     conditions: list[ProblemCondition] = Field(default_factory=list)
     diagram_entities: list[DiagramEntity] = Field(default_factory=list)
     knowledge_links: list[KnowledgeLink] = Field(default_factory=list)
+    provider_trace: list[ProviderTraceEntry] = Field(default_factory=list)
+    normalized_text: str | None = None
+    page_regions: list[PageRegion] = Field(default_factory=list)
+    diagram_regions: list[DiagramRegion] = Field(default_factory=list)
+    confirmation_items: list[ConfirmationItem] = Field(default_factory=list)
     confidence: float
     needs_confirmation: bool
     warnings: list[str] = Field(default_factory=list)
+    created_at: str | None = None
+
+
+class ParseJob(BaseModel):
+    id: str
+    source_asset_id: str
+    provider_strategy: Literal["manual_text", "paddleocr", "tencent_ocr", "hybrid"]
+    status: Literal["queued", "processing", "completed", "failed"]
+    progress: int
+    error_code: str | None = None
+    error_message: str | None = None
+    result_problem_id: str | None = None
+    created_at: str
+    updated_at: str
 
 
 class WhiteboardRect(BaseModel):
@@ -82,7 +140,16 @@ class WhiteboardRect(BaseModel):
     rotation: float | None = None
 
 
+class WhiteboardAnchor(BaseModel):
+    id: str
+    x: float
+    y: float
+    label: str | None = None
+
+
 class WhiteboardEdge(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, serialize_by_alias=True)
+
     id: str
     from_node: str = Field(alias="from")
     to: str
@@ -91,11 +158,41 @@ class WhiteboardEdge(BaseModel):
 
 class WhiteboardNode(BaseModel):
     id: str
-    kind: str
+    kind: Literal[
+        "source_image",
+        "free_text",
+        "formula_block",
+        "physics_body",
+        "surface_line",
+        "force_arrow",
+        "condition_card",
+        "ai_annotation",
+    ]
     rect: WhiteboardRect
     payload: dict[str, Any]
+    anchors: list[WhiteboardAnchor] = Field(default_factory=list)
+    layer: Literal["source", "student", "ai", "overlay"] = "student"
+    z_index: int = 0
     locked: bool = False
+    semantic_role: str | None = None
+    source_refs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class BoardPatch(BaseModel):
+    upsert_nodes: list[WhiteboardNode] = Field(default_factory=list)
+    remove_node_ids: list[str] = Field(default_factory=list)
+    upsert_edges: list[WhiteboardEdge] = Field(default_factory=list)
+    remove_edge_ids: list[str] = Field(default_factory=list)
+
+
+class BoardSuggestion(BaseModel):
+    id: str
+    kind: Literal["diagram_rebuild", "force_completion", "equation_hint", "next_step", "label_fix"]
+    target_node_ids: list[str] = Field(default_factory=list)
+    patch: BoardPatch = Field(default_factory=BoardPatch)
+    reason: str
+    status: Literal["pending", "accepted", "rejected"]
 
 
 class SimulationObject(BaseModel):
@@ -155,6 +252,9 @@ class WorkspaceDocument(BaseModel):
     simulation_bindings: list[SimulationBinding] = Field(default_factory=list)
     selection_state: dict[str, Any] = Field(default_factory=dict)
     mastery: MasteryTrace
+    suggestions: list[BoardSuggestion] = Field(default_factory=list)
+    updated_at: str | None = None
+    revision_id: str | None = None
 
 
 class TutorTurn(BaseModel):
@@ -202,6 +302,26 @@ class CreateWorkspaceInput(BaseModel):
     title: str
     source_asset_id: str | None = None
     problem_id: str | None = None
+    parse_overrides: "ParseOverrides | None" = None
+
+
+class ParseOverrides(BaseModel):
+    stem: str | None = None
+    subquestions: list[ProblemSubquestion] = Field(default_factory=list)
+    conditions: list[ProblemCondition] = Field(default_factory=list)
+
+
+class CreateParseJobInput(BaseModel):
+    source_asset_id: str
+    provider_strategy: Literal["manual_text", "paddleocr", "tencent_ocr", "hybrid"] = "hybrid"
+
+
+class AnalyzeSourceInput(BaseModel):
+    source_asset_id: str | None = None
+
+
+class AnalyzeBoardInput(BaseModel):
+    selected_node_ids: list[str] = Field(default_factory=list)
 
 
 class TutorTurnInput(BaseModel):
@@ -222,3 +342,15 @@ class AssignmentCreateInput(BaseModel):
     workspace_template_id: str
     teacher_view_mode: Literal["light", "review"] = "light"
 
+
+class UpdateWorkspaceInput(BaseModel):
+    document: WorkspaceDocument
+
+
+class WorkspaceRevision(BaseModel):
+    id: str
+    workspace_id: str
+    created_at: str
+
+
+CreateWorkspaceInput.model_rebuild()

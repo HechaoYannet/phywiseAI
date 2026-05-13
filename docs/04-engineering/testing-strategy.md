@@ -9,15 +9,17 @@
 
 ## 集成测试
 
-- 上传到解析。
-- 解析到工作区初始化。
+- 空白工作台创建与保存。
+- 板内导入到 source 节点生成。
+- `analyze-source` 到 suggestions 生成。
+- `accept/reject` 到 `WorkspaceDocument` patch 应用。
 - Tutor 回合生成。
 - 仿真重建。
 - `pnpm typecheck` 与 `pnpm build:web` 作为 Node 侧基线检查。
 
 ## 端到端测试
 
-- 学生完成一次上传到解题流程。
+- 学生完成一次空白建题/导题到受力分析检查流程。
 - 教师查看一次过程回放。
 
 ## 关键验收

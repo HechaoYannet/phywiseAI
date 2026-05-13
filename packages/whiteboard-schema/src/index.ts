@@ -1,13 +1,14 @@
 export type WhiteboardNodeKind =
+  | "source_image"
+  | "free_text"
+  | "formula_block"
+  | "physics_body"
+  | "surface_line"
+  | "force_arrow"
   | "condition_card"
-  | "equation_block"
-  | "force_vector"
-  | "circuit_element"
-  | "ray_path"
-  | "simulation_object"
-  | "hint_card"
-  | "free_note"
-  | "image_asset";
+  | "ai_annotation";
+
+export type WhiteboardLayer = "source" | "student" | "ai" | "overlay";
 
 export interface WhiteboardRect {
   x: number;
@@ -15,6 +16,13 @@ export interface WhiteboardRect {
   w: number;
   h: number;
   rotation?: number;
+}
+
+export interface WhiteboardAnchor {
+  id: string;
+  x: number;
+  y: number;
+  label?: string;
 }
 
 export interface WhiteboardEdge {
@@ -35,9 +43,73 @@ interface WhiteboardNodeBase<TKind extends WhiteboardNodeKind, TPayload> {
   kind: TKind;
   rect: WhiteboardRect;
   payload: TPayload;
-  locked?: boolean;
+  anchors: WhiteboardAnchor[];
+  layer: WhiteboardLayer;
+  z_index: number;
+  locked: boolean;
+  semantic_role?: string;
+  source_refs: string[];
   metadata?: Record<string, unknown>;
 }
+
+export type SourceImageNode = WhiteboardNodeBase<
+  "source_image",
+  {
+    source_asset_id: string;
+    preview_key?: string;
+    alt: string;
+    page?: number;
+    width?: number;
+    height?: number;
+    caption?: string;
+  }
+>;
+
+export type FreeTextNode = WhiteboardNodeBase<
+  "free_text",
+  {
+    text: string;
+    markdown?: string;
+  }
+>;
+
+export type FormulaBlockNode = WhiteboardNodeBase<
+  "formula_block",
+  {
+    latex: string;
+    explanation?: string;
+    status: "draft" | "checked" | "final";
+  }
+>;
+
+export type PhysicsBodyNode = WhiteboardNodeBase<
+  "physics_body",
+  {
+    label: string;
+    body_shape: "block" | "particle" | "cart" | "custom";
+    notes?: string;
+  }
+>;
+
+export type SurfaceLineNode = WhiteboardNodeBase<
+  "surface_line",
+  {
+    label?: string;
+    angle_text?: string;
+    surface_kind: "plane" | "ground" | "wall";
+  }
+>;
+
+export type ForceArrowNode = WhiteboardNodeBase<
+  "force_arrow",
+  {
+    label: string;
+    magnitude_text?: string;
+    direction_deg: number;
+    target_node_id?: string;
+    notes?: string;
+  }
+>;
 
 export type ConditionCardNode = WhiteboardNodeBase<
   "condition_card",
@@ -49,86 +121,25 @@ export type ConditionCardNode = WhiteboardNodeBase<
   }
 >;
 
-export type EquationBlockNode = WhiteboardNodeBase<
-  "equation_block",
-  {
-    latex: string;
-    markdown?: string;
-    status: "draft" | "verified" | "incorrect";
-  }
->;
-
-export type ForceVectorNode = WhiteboardNodeBase<
-  "force_vector",
-  {
-    label: string;
-    magnitude?: string;
-    angle_deg?: number;
-    anchor: string;
-  }
->;
-
-export type CircuitElementNode = WhiteboardNodeBase<
-  "circuit_element",
-  {
-    element: "resistor" | "battery" | "switch" | "ammeter" | "voltmeter" | "wire";
-    label?: string;
-    value?: string;
-  }
->;
-
-export type RayPathNode = WhiteboardNodeBase<
-  "ray_path",
-  {
-    ray_type: "incident" | "reflected" | "refracted" | "normal";
-    label?: string;
-  }
->;
-
-export type SimulationObjectNode = WhiteboardNodeBase<
-  "simulation_object",
-  {
-    simulation_object_id: string;
-    title: string;
-    module: "kinematics" | "forces" | "circuits" | "geometric_optics";
-  }
->;
-
-export type HintCardNode = WhiteboardNodeBase<
-  "hint_card",
+export type AiAnnotationNode = WhiteboardNodeBase<
+  "ai_annotation",
   {
     title: string;
-    hint: string;
-    level: 1 | 2 | 3;
-  }
->;
-
-export type FreeNoteNode = WhiteboardNodeBase<
-  "free_note",
-  {
-    markdown: string;
-  }
->;
-
-export type ImageAssetNode = WhiteboardNodeBase<
-  "image_asset",
-  {
-    source_asset_id: string;
-    alt: string;
-    page?: number;
+    text: string;
+    tone: "hint" | "warning" | "check" | "next_step";
+    suggestion_id?: string;
   }
 >;
 
 export type WhiteboardNode =
+  | SourceImageNode
+  | FreeTextNode
+  | FormulaBlockNode
+  | PhysicsBodyNode
+  | SurfaceLineNode
+  | ForceArrowNode
   | ConditionCardNode
-  | EquationBlockNode
-  | ForceVectorNode
-  | CircuitElementNode
-  | RayPathNode
-  | SimulationObjectNode
-  | HintCardNode
-  | FreeNoteNode
-  | ImageAssetNode;
+  | AiAnnotationNode;
 
 export interface WhiteboardDocumentSnapshot {
   nodes: WhiteboardNode[];
@@ -139,4 +150,3 @@ export interface WhiteboardDocumentSnapshot {
 export function makeNodeId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
-

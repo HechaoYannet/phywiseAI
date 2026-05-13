@@ -16,13 +16,17 @@ const assignment = createDemoAssignment();
 function getNodeTitle(node: WhiteboardNode): string {
   switch (node.kind) {
     case "condition_card":
-      return node.payload.label;
-    case "equation_block":
-      return node.payload.latex;
-    case "hint_card":
-      return node.payload.title;
-    case "simulation_object":
-      return node.payload.title;
+      return String(node.payload.label ?? "条件");
+    case "formula_block":
+      return String(node.payload.latex ?? "公式");
+    case "ai_annotation":
+      return String(node.payload.title ?? "AI 批注");
+    case "physics_body":
+      return String(node.payload.label ?? "物体");
+    case "surface_line":
+      return String(node.payload.label ?? "接触面");
+    case "force_arrow":
+      return String(node.payload.label ?? "力");
     default:
       return node.kind;
   }
@@ -36,8 +40,7 @@ export default function DemoWorkspacePage() {
           <span className="eyebrow">Demo Workspace</span>
           <h1>{workspace.title}</h1>
           <p>
-            这页不是最终白板实现，而是把共享协议、Tutor 回合、题目解析和仿真接口
-            先串成一个可视基线。
+            这页只保留为内部参考，用来查看协议、Tutor 回合、题目解析和仿真接口的样例数据。
           </p>
         </div>
         <div className="workspace-badge">
@@ -95,6 +98,20 @@ export default function DemoWorkspacePage() {
 
         <article className="workspace-card">
           <div className="card-head">
+            <h2>待处理建议</h2>
+            <span className="status-tag">{workspace.suggestions.length} suggestions</span>
+          </div>
+          <ul className="compact-list">
+            {workspace.suggestions.map((suggestion) => (
+              <li key={suggestion.id}>{suggestion.reason}</li>
+            ))}
+          </ul>
+        </article>
+      </section>
+
+      <section className="workspace-grid">
+        <article className="workspace-card">
+          <div className="card-head">
             <h2>仿真协议</h2>
             <span className="status-tag">{simulationScene.module}</span>
           </div>
@@ -127,4 +144,3 @@ export default function DemoWorkspacePage() {
     </main>
   );
 }
-
