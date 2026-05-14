@@ -1,7 +1,7 @@
 "use client";
 
 import type { BoardSuggestion, WorkspaceDocument } from "@phywise/contracts";
-import type { PhyCanvasNode, RichBlockNode, WhiteboardNode } from "@phywise/whiteboard-schema";
+import type { RichBlockNode, WhiteboardNode } from "@phywise/whiteboard-schema";
 import { makeNodeId } from "@phywise/whiteboard-schema";
 import type {
   FormEvent,
@@ -23,8 +23,12 @@ import {
 } from "../lib/api";
 import {
   documentToRuntimeShapes,
+  findPhyCanvasChild,
+  makeChildObjectRef,
   makeNodeObjectRef,
+  mutatePhyCanvasScene,
   parseObjectRef,
+  type PhyCanvasObject,
   parsePhyCanvasObjects,
   sortNodes
 } from "../lib/board-adapter";
@@ -51,6 +55,25 @@ interface RectLike {
   w: number;
   h: number;
   rotation?: number;
+}
+
+interface ScreenRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+interface SizeLike {
+  width: number;
+  height: number;
+}
+
+interface EdgeInsets {
+  top: number;
+  right: number;
+  bottom: number;
+  left: number;
 }
 
 type ToolId = Exclude<BoardTool, "import">;
@@ -82,6 +105,30 @@ type UiIconName =
 
 type SaveState = "idle" | "dirty" | "saving" | "error";
 type AiState = "idle" | "queued" | "analyzing-source" | "analyzing-board" | "error";
+type RemoteMutationState = "idle" | "importing" | "accepting" | "rejecting";
+type ServerResponseSource =
+  | "save"
+  | "analyze-board"
+  | "analyze-source"
+  | "import"
+  | "accept-suggestion"
+  | "reject-suggestion";
+
+interface CommitOptions {
+  persist?: boolean;
+  pushHistory?: boolean;
+  analyze?: boolean;
+  viewport?: CameraState;
+  allowWhileLocked?: boolean;
+}
+
+interface ServerWorkspaceApplyOptions {
+  preserveSelection?: boolean;
+  preserveTool?: boolean;
+  requestId?: number;
+  baseChangeVersion?: number;
+  source: ServerResponseSource;
+}
 
 type InteractionState =
   | {
@@ -125,6 +172,37 @@ type InteractionState =
       originRotation: number;
       snapshot: WorkspaceDocument;
       didMutate: boolean;
+    }
+  | {
+      kind: "drag-child";
+      pointerId: number;
+      nodeId: string;
+      childId: string;
+      originChild: PhyCanvasObject;
+      originPointerScene: Point;
+      snapshot: WorkspaceDocument;
+      didMutate: boolean;
+    }
+  | {
+      kind: "resize-child";
+      pointerId: number;
+      nodeId: string;
+      childId: string;
+      originChild: PhyCanvasObject;
+      originPointerScene: Point;
+      snapshot: WorkspaceDocument;
+      didMutate: boolean;
+    }
+  | {
+      kind: "rotate-child";
+      pointerId: number;
+      nodeId: string;
+      childId: string;
+      originChild: PhyCanvasObject;
+      originPivot: Point;
+      startAngle: number;
+      snapshot: WorkspaceDocument;
+      didMutate: boolean;
     };
 
 const WORLD_WIDTH = 5200;
@@ -135,6 +213,10 @@ const AUTOSAVE_DELAY = 900;
 const ANALYZE_DELAY = 1400;
 const MAX_HISTORY = 40;
 const DEFAULT_CAMERA: CameraState = { x: 120, y: 80, zoom: 1 };
+const DEFAULT_VIEWPORT_SIZE: SizeLike = { width: 240, height: 180 };
+const PHY_CANVAS_PADDING = 16;
+const PHY_CANVAS_HEADER_HEIGHT = 30;
+const PHY_CANVAS_HEADER_GAP = 12;
 
 const TOOLS: Array<{ id: ToolId; icon: UiIconName; label: string; hint: string }> = [
   { id: "select", icon: "cursor", label: "选择", hint: "拖拽对象或拖动画布" },
@@ -334,12 +416,21 @@ function UiIcon({ name, className }: { name: UiIconName; className?: string }) {
 
 export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   const viewportRef = useRef<HTMLDivElement | null>(null);
+  const topbarRef = useRef<HTMLDivElement | null>(null);
+  const dockRef = useRef<HTMLDivElement | null>(null);
+  const sidebarRef = useRef<HTMLElement | null>(null);
   const workspaceRef = useRef<WorkspaceDocument | null>(null);
   const cameraRef = useRef<CameraState>(DEFAULT_CAMERA);
   const interactionRef = useRef<InteractionState | null>(null);
   const pointersRef = useRef<Map<number, Point>>(new Map());
   const analyzeTimerRef = useRef<number | null>(null);
+  const viewportPersistTimerRef = useRef<number | null>(null);
   const changeVersionRef = useRef(0);
+  const requestSeqRef = useRef(0);
+  const lastAppliedRequestRef = useRef(0);
+  const savePromiseRef = useRef<Promise<WorkspaceDocument | null> | null>(null);
+  const saveStateRef = useRef<SaveState>("idle");
+  const remoteMutationLockRef = useRef(false);
   const editingBaselineRef = useRef<Record<string, WorkspaceDocument>>({});
 
   const [workspace, setWorkspace] = useState<WorkspaceDocument | null>(null);
@@ -349,6 +440,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   const [loading, setLoading] = useState(true);
   const [saveState, setSaveState] = useState<SaveState>("idle");
   const [aiState, setAiState] = useState<AiState>("idle");
+  const [remoteMutationState, setRemoteMutationState] = useState<RemoteMutationState>("idle");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [importSheetOpen, setImportSheetOpen] = useState(false);
   const [importMode, setImportMode] = useState<"text" | "file">("text");
@@ -372,6 +464,10 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   }, [camera]);
 
   useEffect(() => {
+    saveStateRef.current = saveState;
+  }, [saveState]);
+
+  useEffect(() => {
     workspaceRef.current = workspace;
   }, [workspace]);
 
@@ -388,12 +484,16 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
         }
 
         const normalized = normalizeDocument(result);
-        workspaceRef.current = normalized;
-        setWorkspace(normalized);
-        setCamera(normalized.viewport ?? DEFAULT_CAMERA);
+        changeVersionRef.current = 0;
+        requestSeqRef.current = 0;
+        lastAppliedRequestRef.current = 0;
+        savePromiseRef.current = null;
+        remoteMutationLockRef.current = false;
+        setWorkspaceSnapshot(normalized);
+        setCameraState(normalized.viewport ?? DEFAULT_CAMERA, { persist: false });
         setHistoryPast([]);
         setHistoryFuture([]);
-        setSaveState("idle");
+        updateSaveState("idle");
       } catch (error) {
         if (!cancelled) {
           setErrorMessage(toMessage(error));
@@ -440,6 +540,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     return () => {
       if (analyzeTimerRef.current) {
         window.clearTimeout(analyzeTimerRef.current);
+      }
+      if (viewportPersistTimerRef.current) {
+        window.clearTimeout(viewportPersistTimerRef.current);
       }
     };
   }, []);
@@ -568,45 +671,156 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     return worldRectToScreenRect(selectionWorldRect, camera);
   }, [camera, selectionWorldRect]);
 
-  async function saveCurrentWorkspace(force = false) {
-    const current = workspaceRef.current;
+  function getViewportSize(): SizeLike {
+    const rect = viewportRef.current?.getBoundingClientRect();
+    if (!rect) {
+      return DEFAULT_VIEWPORT_SIZE;
+    }
+    return { width: rect.width, height: rect.height };
+  }
+
+  function setWorkspaceSnapshot(nextDocument: WorkspaceDocument) {
+    workspaceRef.current = nextDocument;
+    setWorkspace(nextDocument);
+  }
+
+  function updateSaveState(nextState: SaveState) {
+    saveStateRef.current = nextState;
+    setSaveState(nextState);
+  }
+
+  function setCameraState(nextCamera: CameraState, options?: { persist?: boolean }) {
+    const clampedCamera = clampCamera(nextCamera, getViewportSize());
+    cameraRef.current = clampedCamera;
+    setCamera(clampedCamera);
+    if (options?.persist !== false && !remoteMutationLockRef.current) {
+      scheduleViewportPersist(clampedCamera);
+    }
+  }
+
+  function scheduleViewportPersist(nextViewport: CameraState) {
+    if (!workspaceRef.current) {
+      return;
+    }
+
+    if (viewportPersistTimerRef.current) {
+      window.clearTimeout(viewportPersistTimerRef.current);
+    }
+
+    viewportPersistTimerRef.current = window.setTimeout(() => {
+      const current = workspaceRef.current;
+      if (!current || sameCamera(current.viewport, nextViewport)) {
+        return;
+      }
+
+      commitWorkspace(
+        (document) => ({
+          ...document,
+          viewport: nextViewport
+        }),
+        { persist: true, viewport: nextViewport }
+      );
+    }, 260);
+  }
+
+  function snapshotCurrentWorkspace(current = workspaceRef.current) {
     if (!current) {
-      return;
+      return null;
     }
-
-    if (!force && saveState !== "dirty") {
-      return;
-    }
-
-    const snapshot = normalizeDocument({
+    return normalizeDocument({
       ...cloneDocument(current),
       viewport: cameraRef.current
     });
-    const saveVersion = changeVersionRef.current;
-    setSaveState("saving");
+  }
 
-    try {
-      const result = await saveWorkspace(workspaceId, { document: snapshot });
-      if (changeVersionRef.current === saveVersion) {
-        applyServerWorkspace(result, { preserveSelection: true, preserveTool: true });
-        setSaveState("idle");
-      } else {
-        const next = workspaceRef.current;
-        if (next) {
-          const merged = {
-            ...next,
-            updated_at: result.updated_at,
-            revision_id: result.revision_id
-          };
-          workspaceRef.current = merged;
-          setWorkspace(merged);
-        }
-        setSaveState("dirty");
-      }
-    } catch (error) {
-      setSaveState("error");
-      setErrorMessage(toMessage(error));
+  function nextRequestId() {
+    requestSeqRef.current += 1;
+    lastAppliedRequestRef.current = Math.max(lastAppliedRequestRef.current, requestSeqRef.current);
+    return requestSeqRef.current;
+  }
+
+  async function flushCurrentWorkspace(force = false) {
+    if (savePromiseRef.current) {
+      await savePromiseRef.current;
     }
+
+    if (force || saveStateRef.current === "dirty") {
+      const saved = await saveCurrentWorkspace(force);
+      if (!saved && saveStateRef.current === "error") {
+        throw new Error("当前板面保存失败，已取消后续服务端操作。");
+      }
+    }
+
+    return workspaceRef.current;
+  }
+
+  async function runLockedRemoteMutation<T>(
+    state: Exclude<RemoteMutationState, "idle">,
+    task: () => Promise<T>
+  ) {
+    remoteMutationLockRef.current = true;
+    setRemoteMutationState(state);
+    try {
+      await flushCurrentWorkspace(true);
+      return await task();
+    } finally {
+      remoteMutationLockRef.current = false;
+      setRemoteMutationState("idle");
+    }
+  }
+
+  async function saveCurrentWorkspace(force = false) {
+    const current = workspaceRef.current;
+    if (!current) {
+      return null;
+    }
+
+    if (!force && saveStateRef.current !== "dirty") {
+      return current;
+    }
+
+    if (savePromiseRef.current) {
+      await savePromiseRef.current;
+      if (saveStateRef.current !== "dirty") {
+        return workspaceRef.current;
+      }
+    }
+
+    const snapshot = snapshotCurrentWorkspace(current);
+    if (!snapshot) {
+      return null;
+    }
+
+    const saveVersion = changeVersionRef.current;
+    const requestId = nextRequestId();
+    updateSaveState("saving");
+
+    let requestPromise: Promise<WorkspaceDocument | null> | null = null;
+    requestPromise = (async () => {
+      try {
+        const result = await saveWorkspace(workspaceId, { document: snapshot });
+        applyServerWorkspace(result, {
+          source: "save",
+          requestId,
+          baseChangeVersion: saveVersion,
+          preserveSelection: true,
+          preserveTool: true
+        });
+        updateSaveState(changeVersionRef.current === saveVersion ? "idle" : "dirty");
+        return result;
+      } catch (error) {
+        updateSaveState("error");
+        setErrorMessage(toMessage(error));
+        return null;
+      } finally {
+        if (savePromiseRef.current === requestPromise) {
+          savePromiseRef.current = null;
+        }
+      }
+    })();
+
+    savePromiseRef.current = requestPromise;
+    return requestPromise;
   }
 
   function scheduleBoardAnalysis(delay = ANALYZE_DELAY) {
@@ -626,16 +840,40 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
   async function runBoardAnalysis() {
     const current = workspaceRef.current;
-    if (!current) {
+    if (!current || remoteMutationLockRef.current) {
       return;
+    }
+
+    if (analyzeTimerRef.current) {
+      window.clearTimeout(analyzeTimerRef.current);
+      analyzeTimerRef.current = null;
     }
 
     setAiState("analyzing-board");
     try {
+      await flushCurrentWorkspace();
+      const latest = workspaceRef.current;
+      if (!latest) {
+        return;
+      }
+
+      const analysisVersion = changeVersionRef.current;
+      const requestId = nextRequestId();
       const result = await analyzeWorkspaceBoard(workspaceId, {
-        selected_object_refs: current.selection_state.selected_object_refs ?? []
+        selected_object_refs: latest.selection_state.selected_object_refs ?? []
       });
-      applyServerWorkspace(result, { preserveSelection: true, preserveTool: true });
+      const applied = applyServerWorkspace(result, {
+        source: "analyze-board",
+        requestId,
+        baseChangeVersion: analysisVersion,
+        preserveSelection: true,
+        preserveTool: true
+      });
+      if (!applied && changeVersionRef.current !== analysisVersion) {
+        setAiState("queued");
+        scheduleBoardAnalysis(ANALYZE_DELAY);
+        return;
+      }
       setAiState("idle");
     } catch (error) {
       setAiState("error");
@@ -645,10 +883,39 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
   function applyServerWorkspace(
     nextDocument: WorkspaceDocument,
-    options?: { preserveSelection?: boolean; preserveTool?: boolean }
+    options: ServerWorkspaceApplyOptions
   ) {
+    if (typeof options.requestId === "number" && options.requestId < lastAppliedRequestRef.current) {
+      return false;
+    }
+
     const current = workspaceRef.current;
     const normalized = normalizeDocument(nextDocument);
+    const hasLocalDivergence =
+      typeof options.baseChangeVersion === "number" &&
+      changeVersionRef.current !== options.baseChangeVersion;
+
+    if (typeof options.requestId === "number") {
+      lastAppliedRequestRef.current = options.requestId;
+    }
+
+    if (hasLocalDivergence) {
+      if (options.source === "save") {
+        if (current) {
+          setWorkspaceSnapshot({
+            ...current,
+            updated_at: normalized.updated_at,
+            revision_id: normalized.revision_id
+          });
+        }
+        return false;
+      }
+
+      if (options.source === "analyze-board") {
+        return false;
+      }
+    }
+
     const nextSelection = options?.preserveSelection
       ? resolveSelection(normalized, current?.selection_state.selected_object_refs ?? [])
       : normalized.selection_state.selected_object_refs;
@@ -666,24 +933,27 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       }
     };
 
-    workspaceRef.current = merged;
-    setWorkspace(merged);
+    setWorkspaceSnapshot(merged);
+    return true;
   }
 
   function commitWorkspace(
     updater: (document: WorkspaceDocument) => WorkspaceDocument,
-    options?: { persist?: boolean; pushHistory?: boolean; analyze?: boolean }
+    options?: CommitOptions
   ) {
     const current = workspaceRef.current;
     if (!current) {
       return;
     }
 
+    if (remoteMutationLockRef.current && !options?.allowWhileLocked) {
+      return;
+    }
+
     const snapshot = cloneDocument(current);
     const nextDocument = normalizeDocument(updater(cloneDocument(current)));
-    nextDocument.viewport = cameraRef.current;
-    workspaceRef.current = nextDocument;
-    setWorkspace(nextDocument);
+    nextDocument.viewport = options?.viewport ?? cameraRef.current;
+    setWorkspaceSnapshot(nextDocument);
 
     if (options?.pushHistory) {
       pushHistorySnapshot(snapshot);
@@ -691,7 +961,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
     if (options?.persist) {
       changeVersionRef.current += 1;
-      setSaveState("dirty");
+      updateSaveState("dirty");
     }
 
     if (options?.analyze) {
@@ -713,7 +983,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           selected_object_refs: resolveSelection(document, selectedRefs)
         }
       }),
-      { persist }
+      { persist, allowWhileLocked: true }
     );
     setMoreMenuOpen(false);
   }
@@ -727,7 +997,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           active_tool: tool
         }
       }),
-      {}
+      { allowWhileLocked: true }
     );
   }
 
@@ -736,30 +1006,39 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     const anchorY = Math.max(48, worldPoint.y - (tool === "diagram" ? 120 : 90));
     const nextNode = createNodeFromTool(tool, anchorX, anchorY);
     commitWorkspace(
-      (document) => ({
-        ...document,
-        whiteboard_nodes: sortNodes([...document.whiteboard_nodes, nextNode]),
-        selection_state: {
-          ...document.selection_state,
-          selected_object_refs: [makeNodeObjectRef(nextNode.id)],
-          active_tool: "select"
-        }
-      }),
+      (document) => {
+        const elevatedNode = {
+          ...nextNode,
+          z_index: getNextNodeZIndex(document, 1)[0]
+        };
+        return {
+          ...document,
+          whiteboard_nodes: sortNodes([...document.whiteboard_nodes, elevatedNode]),
+          selection_state: {
+            ...document.selection_state,
+            selected_object_refs: [makeNodeObjectRef(elevatedNode.id)],
+            active_tool: "select"
+          }
+        };
+      },
       { persist: true, pushHistory: true, analyze: true }
     );
   }
 
   function insertTemplate() {
     commitWorkspace(
-      (document) => ({
-        ...document,
-        whiteboard_nodes: sortNodes([...document.whiteboard_nodes, ...createForceAnalysisTemplate()]),
-        selection_state: {
-          ...document.selection_state,
-          selected_object_refs: [],
-          active_tool: "select"
-        }
-      }),
+      (document) => {
+        const rebasedTemplate = rebaseNodeStack(document, createForceAnalysisTemplate());
+        return {
+          ...document,
+          whiteboard_nodes: sortNodes([...document.whiteboard_nodes, ...rebasedTemplate]),
+          selection_state: {
+            ...document.selection_state,
+            selected_object_refs: [],
+            active_tool: "select"
+          }
+        };
+      },
       { persist: true, pushHistory: true, analyze: true }
     );
   }
@@ -828,13 +1107,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
-    const viewport = viewportRef.current.getBoundingClientRect();
-    const nextCamera = clampCamera({
-      x: selectionWorldRect.x + selectionWorldRect.w / 2 - viewport.width / camera.zoom / 2,
-      y: selectionWorldRect.y + selectionWorldRect.h / 2 - viewport.height / camera.zoom / 2,
-      zoom: camera.zoom
-    });
-    setCamera(nextCamera);
+    setCameraState(
+      focusCameraOnRect(selectionWorldRect, camera.zoom, viewportRef.current.getBoundingClientRect(), overlaySafeInsets)
+    );
   }
 
   function fitAll() {
@@ -844,7 +1119,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
     const nodes = workspaceRef.current.whiteboard_nodes;
     if (!nodes.length) {
-      setCamera(DEFAULT_CAMERA);
+      setCameraState(DEFAULT_CAMERA);
       return;
     }
 
@@ -860,13 +1135,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       Math.min(1.25, MAX_ZOOM)
     );
 
-    setCamera(
-      clampCamera({
-        x: bounds.x + bounds.w / 2 - viewport.width / nextZoom / 2,
-        y: bounds.y + bounds.h / 2 - viewport.height / nextZoom / 2,
-        zoom: nextZoom
-      })
-    );
+    setCameraState({
+      x: bounds.x + bounds.w / 2 - viewport.width / nextZoom / 2,
+      y: bounds.y + bounds.h / 2 - viewport.height / nextZoom / 2,
+      zoom: nextZoom
+    });
   }
 
   function zoomAt(clientX: number, clientY: number, nextZoom: number) {
@@ -881,8 +1154,8 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       x: worldPoint.x - (clientX - viewport.left) / clampedZoom,
       y: worldPoint.y - (clientY - viewport.top) / clampedZoom,
       zoom: clampedZoom
-    });
-    setCamera(nextCamera);
+    }, getViewportSize());
+    setCameraState(nextCamera);
   }
 
   function zoomBy(delta: number) {
@@ -909,6 +1182,13 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     }
 
     if (activeTool !== "select") {
+      if (!event.isPrimary || pointersRef.current.size > 0) {
+        return;
+      }
+      const target = event.target as HTMLElement;
+      if (target.closest(".wb-node, .wb-selection-frame, .wb-selection-menu, .wb-more-menu")) {
+        return;
+      }
       const worldPoint = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
       insertNodeAt(worldPoint, activeTool);
       return;
@@ -958,13 +1238,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       if (Math.abs(dx) > 2 || Math.abs(dy) > 2) {
         interaction.moved = true;
       }
-      setCamera(
-        clampCamera({
-          x: interaction.originCamera.x - dx / interaction.originCamera.zoom,
-          y: interaction.originCamera.y - dy / interaction.originCamera.zoom,
-          zoom: interaction.originCamera.zoom
-        })
-      );
+      setCameraState({
+        x: interaction.originCamera.x - dx / interaction.originCamera.zoom,
+        y: interaction.originCamera.y - dy / interaction.originCamera.zoom,
+        zoom: interaction.originCamera.zoom
+      });
       return;
     }
 
@@ -986,8 +1264,8 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
         x: interaction.worldPoint.x - (midpoint.x - viewport.left) / nextZoom,
         y: interaction.worldPoint.y - (midpoint.y - viewport.top) / nextZoom,
         zoom: nextZoom
-      });
-      setCamera(nextCamera);
+      }, getViewportSize());
+      setCameraState(nextCamera);
     }
   }
 
@@ -1024,7 +1302,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     }
 
     const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, button")) {
+    if (target.closest("input, textarea, select, [contenteditable='true']")) {
       return;
     }
 
@@ -1085,7 +1363,78 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     };
   }
 
-  function handleNodeInteractionMove(event: ReactPointerEvent<HTMLElement | HTMLButtonElement>) {
+  function startChildDrag(
+    event: ReactPointerEvent<SVGElement>,
+    node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+    child: PhyCanvasObject
+  ) {
+    if (!viewportRef.current || activeTool !== "select" || node.locked) {
+      return;
+    }
+
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    handleChildSelect(node.id, child.id);
+    const viewport = viewportRef.current.getBoundingClientRect();
+    const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+    interactionRef.current = {
+      kind: "drag-child",
+      pointerId: event.pointerId,
+      nodeId: node.id,
+      childId: child.id,
+      originChild: child,
+      originPointerScene: worldPointToPhyCanvasScenePoint(node, pointerWorld),
+      snapshot: cloneDocument(workspaceRef.current!),
+      didMutate: false
+    };
+  }
+
+  function startChildResize(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!viewportRef.current || !selectedNode || selectedNode.kind !== "phy_canvas" || !selectedChild) {
+      return;
+    }
+
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const viewport = viewportRef.current.getBoundingClientRect();
+    const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+    interactionRef.current = {
+      kind: "resize-child",
+      pointerId: event.pointerId,
+      nodeId: selectedNode.id,
+      childId: selectedChild.id,
+      originChild: selectedChild,
+      originPointerScene: worldPointToPhyCanvasScenePoint(selectedNode, pointerWorld),
+      snapshot: cloneDocument(workspaceRef.current!),
+      didMutate: false
+    };
+  }
+
+  function startChildRotate(event: ReactPointerEvent<HTMLButtonElement>) {
+    if (!viewportRef.current || !selectedNode || selectedNode.kind !== "phy_canvas" || !selectedChild) {
+      return;
+    }
+
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const viewport = viewportRef.current.getBoundingClientRect();
+    const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+    const originPivot = { x: selectedChild.x, y: selectedChild.y };
+    const pointerScene = worldPointToPhyCanvasScenePoint(selectedNode, pointerWorld);
+    interactionRef.current = {
+      kind: "rotate-child",
+      pointerId: event.pointerId,
+      nodeId: selectedNode.id,
+      childId: selectedChild.id,
+      originChild: selectedChild,
+      originPivot,
+      startAngle: Math.atan2(pointerScene.y - originPivot.y, pointerScene.x - originPivot.x),
+      snapshot: cloneDocument(workspaceRef.current!),
+      didMutate: false
+    };
+  }
+
+  function handleNodeInteractionMove(event: ReactPointerEvent<HTMLElement | HTMLButtonElement | SVGElement>) {
     const interaction = interactionRef.current;
     if (!interaction || !workspaceRef.current || !viewportRef.current) {
       return;
@@ -1143,10 +1492,78 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           }),
         { persist: true }
       );
+      return;
+    }
+
+    if (
+      interaction.kind !== "drag-child" &&
+      interaction.kind !== "resize-child" &&
+      interaction.kind !== "rotate-child"
+    ) {
+      return;
+    }
+
+    const node = workspaceRef.current.whiteboard_nodes.find(
+      (item): item is Extract<WhiteboardNode, { kind: "phy_canvas" }> =>
+        item.id === interaction.nodeId && item.kind === "phy_canvas"
+    );
+    if (!node) {
+      return;
+    }
+
+    if (interaction.kind === "drag-child") {
+      const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+      const pointerScene = worldPointToPhyCanvasScenePoint(node, pointerWorld);
+      interaction.didMutate = true;
+      commitWorkspace(
+        (document) =>
+          updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
+            x: snapSceneValue(interaction.originChild.x + (pointerScene.x - interaction.originPointerScene.x)),
+            y: snapSceneValue(interaction.originChild.y + (pointerScene.y - interaction.originPointerScene.y))
+          }),
+        { persist: true }
+      );
+      return;
+    }
+
+    if (interaction.kind === "resize-child") {
+      const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+      const pointerScene = worldPointToPhyCanvasScenePoint(node, pointerWorld);
+      interaction.didMutate = true;
+      commitWorkspace(
+        (document) =>
+          updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
+            w: snapSceneValue(
+              Math.max(minChildSize(interaction.originChild.kind).w, interaction.originChild.w + (pointerScene.x - interaction.originPointerScene.x))
+            ),
+            h: snapSceneValue(
+              Math.max(minChildSize(interaction.originChild.kind).h, interaction.originChild.h + (pointerScene.y - interaction.originPointerScene.y))
+            )
+          }),
+        { persist: true }
+      );
+      return;
+    }
+
+    if (interaction.kind === "rotate-child") {
+      const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+      const pointerScene = worldPointToPhyCanvasScenePoint(node, pointerWorld);
+      const deltaAngle =
+        (Math.atan2(pointerScene.y - interaction.originPivot.y, pointerScene.x - interaction.originPivot.x) -
+          interaction.startAngle) *
+        (180 / Math.PI);
+      interaction.didMutate = true;
+      commitWorkspace(
+        (document) =>
+          updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
+            rotation: snapSceneValue((interaction.originChild.rotation ?? 0) + deltaAngle)
+          }),
+        { persist: true }
+      );
     }
   }
 
-  function finishNodeInteraction(event: ReactPointerEvent<HTMLElement | HTMLButtonElement>) {
+  function finishNodeInteraction(event: ReactPointerEvent<HTMLElement | HTMLButtonElement | SVGElement>) {
     const interaction = interactionRef.current;
     if (!interaction || !("pointerId" in interaction) || interaction.pointerId !== event.pointerId) {
       return;
@@ -1155,7 +1572,10 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     if (
       (interaction.kind === "drag-node" ||
         interaction.kind === "resize-node" ||
-        interaction.kind === "rotate-node") &&
+        interaction.kind === "rotate-node" ||
+        interaction.kind === "drag-child" ||
+        interaction.kind === "resize-child" ||
+        interaction.kind === "rotate-child") &&
       interaction.didMutate
     ) {
       pushHistorySnapshot(interaction.snapshot);
@@ -1190,11 +1610,28 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     setAiState("analyzing-source");
     setErrorMessage(null);
     try {
-      const attached = await attachWorkspaceSource(workspaceId, formData);
-      applyServerWorkspace(attached, { preserveTool: true });
-      const analyzed = await analyzeWorkspaceSource(workspaceId, {});
-      applyServerWorkspace(analyzed, { preserveTool: true });
+      await runLockedRemoteMutation("importing", async () => {
+        const attachRequestId = nextRequestId();
+        const attachVersion = changeVersionRef.current;
+        const attached = await attachWorkspaceSource(workspaceId, formData);
+        applyServerWorkspace(attached, {
+          source: "import",
+          requestId: attachRequestId,
+          baseChangeVersion: attachVersion,
+          preserveTool: true
+        });
+        const analyzeSourceRequestId = nextRequestId();
+        const analyzeSourceVersion = changeVersionRef.current;
+        const analyzed = await analyzeWorkspaceSource(workspaceId, {});
+        applyServerWorkspace(analyzed, {
+          source: "analyze-source",
+          requestId: analyzeSourceRequestId,
+          baseChangeVersion: analyzeSourceVersion,
+          preserveTool: true
+        });
+      });
       setAiState("idle");
+      updateSaveState("idle");
       setImportSheetOpen(false);
       setSidebarCollapsed(false);
       setImportText("");
@@ -1212,9 +1649,18 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
     pushHistorySnapshot(workspaceRef.current);
     try {
-      const next = await acceptWorkspaceSuggestion(workspaceId, suggestionId);
-      applyServerWorkspace(next, { preserveTool: true });
-      setSaveState("idle");
+      await runLockedRemoteMutation("accepting", async () => {
+        const acceptRequestId = nextRequestId();
+        const acceptVersion = changeVersionRef.current;
+        const next = await acceptWorkspaceSuggestion(workspaceId, suggestionId);
+        applyServerWorkspace(next, {
+          source: "accept-suggestion",
+          requestId: acceptRequestId,
+          baseChangeVersion: acceptVersion,
+          preserveTool: true
+        });
+      });
+      updateSaveState("idle");
       setAiState("idle");
     } catch (error) {
       setErrorMessage(toMessage(error));
@@ -1223,9 +1669,19 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
   async function handleRejectSuggestion(suggestionId: string) {
     try {
-      const next = await rejectWorkspaceSuggestion(workspaceId, suggestionId);
-      applyServerWorkspace(next, { preserveSelection: true, preserveTool: true });
-      setSaveState("idle");
+      await runLockedRemoteMutation("rejecting", async () => {
+        const rejectRequestId = nextRequestId();
+        const rejectVersion = changeVersionRef.current;
+        const next = await rejectWorkspaceSuggestion(workspaceId, suggestionId);
+        applyServerWorkspace(next, {
+          source: "reject-suggestion",
+          requestId: rejectRequestId,
+          baseChangeVersion: rejectVersion,
+          preserveSelection: true,
+          preserveTool: true
+        });
+      });
+      updateSaveState("idle");
     } catch (error) {
       setErrorMessage(toMessage(error));
     }
@@ -1242,10 +1698,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     setHistoryFuture((items) => [cloneDocument(current), ...items].slice(0, MAX_HISTORY));
     const restored = normalizeDocument(previous);
     restored.viewport = cameraRef.current;
-    workspaceRef.current = restored;
-    setWorkspace(restored);
+    setWorkspaceSnapshot(restored);
     changeVersionRef.current += 1;
-    setSaveState("dirty");
+    updateSaveState("dirty");
     scheduleBoardAnalysis(600);
   }
 
@@ -1260,10 +1715,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     setHistoryPast((items) => [...items.slice(-(MAX_HISTORY - 1)), cloneDocument(current)]);
     const restored = normalizeDocument(next);
     restored.viewport = cameraRef.current;
-    workspaceRef.current = restored;
-    setWorkspace(restored);
+    setWorkspaceSnapshot(restored);
     changeVersionRef.current += 1;
-    setSaveState("dirty");
+    updateSaveState("dirty");
     scheduleBoardAnalysis(600);
   }
 
@@ -1299,7 +1753,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   }
 
   function handleChildSelect(nodeId: string, childId: string) {
-    updateSelection([`node:${nodeId}#child:${childId}`], false);
+    updateSelection([makeChildObjectRef(nodeId, childId)], false);
   }
 
   function handleSuggestionMarkerClick(suggestion: BoardSuggestion) {
@@ -1323,14 +1777,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
-    const viewport = viewportRef.current.getBoundingClientRect();
-    setCamera(
-      clampCamera({
-        x: rect.x + rect.w / 2 - viewport.width / camera.zoom / 2,
-        y: rect.y + rect.h / 2 - viewport.height / camera.zoom / 2,
-        zoom: camera.zoom
-      })
-    );
+    setCameraState(focusCameraOnRect(rect, camera.zoom, viewportRef.current.getBoundingClientRect(), overlaySafeInsets));
   }
 
   function handleChatStubSubmit() {
@@ -1346,6 +1793,31 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     height: `${WORLD_HEIGHT}px`,
     transform: `translate(${-camera.x}px, ${-camera.y}px) scale(${camera.zoom})`
   };
+  const viewportBounds = viewportRef.current?.getBoundingClientRect() ?? null;
+  const overlaySafeInsets = getOverlaySafeInsets(
+    viewportBounds,
+    topbarRef.current?.getBoundingClientRect() ?? null,
+    dockRef.current?.getBoundingClientRect() ?? null,
+    sidebarRef.current?.getBoundingClientRect() ?? null
+  );
+  const selectionMenuPosition =
+    selectionScreenRect && viewportBounds
+      ? getSelectionMenuPosition(selectionScreenRect, viewportBounds, overlaySafeInsets)
+      : null;
+  const moreMenuPosition =
+    selectionScreenRect && viewportBounds
+      ? getMoreMenuPosition(selectionScreenRect, viewportBounds, overlaySafeInsets)
+      : null;
+  const visibleSuggestionMarkers =
+    viewportBounds === null
+      ? suggestionMarkers
+      : suggestionMarkers.map((marker) => ({
+          ...marker,
+          ...clampMarkerPosition(marker.left, marker.top, viewportBounds, overlaySafeInsets)
+        }));
+  const remoteBusy = remoteMutationState !== "idle";
+  const canTransformSelectedChild =
+    !!selectedChild && selectedChild.kind !== "label" && selectedNode?.kind === "phy_canvas";
 
   if (loading) {
     return (
@@ -1372,11 +1844,12 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
   return (
     <div className="wb-layout">
-      <div className="wb-topbar" onPointerDown={(event) => event.stopPropagation()}>
+      <div ref={topbarRef} className="wb-topbar" onPointerDown={(event) => event.stopPropagation()}>
         <div className="wb-topbar__cluster">
           <input
             className="wb-title-input"
             value={workspace.title}
+            disabled={remoteBusy}
             onChange={(event) => {
               commitWorkspace(
                 (document) => ({
@@ -1422,7 +1895,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
         </div>
       </div>
 
-      <div className="wb-dock wb-dock--left" onPointerDown={(event) => event.stopPropagation()}>
+      <div ref={dockRef} className="wb-dock wb-dock--left" onPointerDown={(event) => event.stopPropagation()}>
         <div className="wb-dock__section">
           {TOOLS.map((tool) => (
             <button
@@ -1463,6 +1936,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       </div>
 
       <aside
+        ref={sidebarRef}
         className={`wb-sidebar ${sidebarCollapsed ? "is-collapsed" : ""}`}
         onPointerDown={(event) => event.stopPropagation()}
       >
@@ -1524,11 +1998,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                         <p>{suggestion.reason}</p>
                       </button>
                       <div className="wb-suggestion-card__actions">
-                        <button className="wb-mini-button" type="button" onClick={() => void handleAcceptSuggestion(suggestion.id)}>
+                        <button className="wb-mini-button" type="button" disabled={remoteBusy} onClick={() => void handleAcceptSuggestion(suggestion.id)}>
                           <UiIcon name="check" />
                           <span>接受</span>
                         </button>
-                        <button className="wb-mini-button wb-mini-button--ghost" type="button" onClick={() => void handleRejectSuggestion(suggestion.id)}>
+                        <button className="wb-mini-button wb-mini-button--ghost" type="button" disabled={remoteBusy} onClick={() => void handleRejectSuggestion(suggestion.id)}>
                           <UiIcon name="close" />
                           <span>拒绝</span>
                         </button>
@@ -1592,13 +2066,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
             zoomAt(event.clientX, event.clientY, camera.zoom - event.deltaY * 0.0025);
             return;
           }
-          setCamera(
-            clampCamera({
-              x: cameraRef.current.x + event.deltaX / cameraRef.current.zoom,
-              y: cameraRef.current.y + event.deltaY / cameraRef.current.zoom,
-              zoom: cameraRef.current.zoom
-            })
-          );
+          setCameraState({
+            x: cameraRef.current.x + event.deltaX / cameraRef.current.zoom,
+            y: cameraRef.current.y + event.deltaY / cameraRef.current.zoom,
+            zoom: cameraRef.current.zoom
+          });
         }}
       >
         <div className="wb-grid" />
@@ -1629,14 +2101,14 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 onClick={() => handleNodeSelect(node.id)}
               >
                 {node.kind === "source_image" ? (
-                  <button className="wb-image-node" type="button" onClick={() => handleNodeSelect(node.id)}>
+                  <div className="wb-image-node">
                     {node.payload.preview_key ? (
                       <img src={buildPreviewUrl(node.payload.preview_key)} alt={node.payload.alt} />
                     ) : null}
                     <div className="wb-image-node__caption">
                       <span>{node.payload.caption ?? node.payload.alt}</span>
                     </div>
-                  </button>
+                  </div>
                 ) : null}
 
                 {node.kind === "rich_block" ? (
@@ -1684,9 +2156,10 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                         const commonProps = {
                           className: `wb-phy-shape wb-phy-shape--${item.kind} ${childSelected ? "is-selected" : ""}`,
                           onPointerDown: (event: ReactPointerEvent<SVGElement>) => {
-                            event.stopPropagation();
-                            handleChildSelect(node.id, item.id);
+                            startChildDrag(event, node, item);
                           },
+                          onPointerMove: handleNodeInteractionMove,
+                          onPointerUp: finishNodeInteraction,
                           onClick: (event: ReactMouseEvent<SVGElement>) => {
                             event.stopPropagation();
                             handleChildSelect(node.id, item.id);
@@ -1738,13 +2211,13 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 ) : null}
 
                 {node.kind === "ai_annotation" ? (
-                  <button className="wb-ai-card" type="button" onClick={() => handleNodeSelect(node.id)}>
+                  <div className="wb-ai-card">
                     <div className="wb-ai-card__head">
                       <UiIcon name="spark" />
                       <span>{node.payload.title}</span>
                     </div>
                     <p>{node.payload.text}</p>
-                  </button>
+                  </div>
                 ) : null}
               </div>
             );
@@ -1769,7 +2242,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
             </div>
           ) : null}
 
-          {suggestionMarkers.map((marker) => (
+          {visibleSuggestionMarkers.map((marker) => (
             <button
               key={marker.id}
               className={`wb-suggestion-marker ${marker.active ? "is-active" : ""}`}
@@ -1812,14 +2285,33 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                       onPointerUp={finishNodeInteraction}
                     />
                   </>
+                ) : canTransformSelectedChild ? (
+                  <>
+                    <button
+                      className="wb-selection-handle wb-selection-handle--rotate"
+                      type="button"
+                      title="旋转子元素"
+                      onPointerDown={startChildRotate}
+                      onPointerMove={handleNodeInteractionMove}
+                      onPointerUp={finishNodeInteraction}
+                    />
+                    <button
+                      className="wb-selection-handle wb-selection-handle--resize"
+                      type="button"
+                      title="缩放子元素"
+                      onPointerDown={startChildResize}
+                      onPointerMove={handleNodeInteractionMove}
+                      onPointerUp={finishNodeInteraction}
+                    />
+                  </>
                 ) : null}
               </div>
 
               <div
-                className="wb-selection-menu"
+                className={`wb-selection-menu ${selectionMenuPosition?.placement === "below" ? "is-below" : ""}`}
                 style={{
-                  left: `${selectionScreenRect.left + selectionScreenRect.width / 2}px`,
-                  top: `${Math.max(16, selectionScreenRect.top - 20)}px`
+                  left: `${selectionMenuPosition?.left ?? selectionScreenRect.left + selectionScreenRect.width / 2}px`,
+                  top: `${selectionMenuPosition?.top ?? Math.max(16, selectionScreenRect.top - 20)}px`
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
               >
@@ -1876,8 +2368,8 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 <div
                   className="wb-more-menu"
                   style={{
-                    left: `${selectionScreenRect.left + selectionScreenRect.width / 2}px`,
-                    top: `${Math.max(58, selectionScreenRect.top + 24)}px`
+                    left: `${moreMenuPosition?.left ?? selectionScreenRect.left + selectionScreenRect.width / 2}px`,
+                    top: `${moreMenuPosition?.top ?? Math.max(58, selectionScreenRect.top + 24)}px`
                   }}
                   onPointerDown={(event) => event.stopPropagation()}
                 >
@@ -1962,7 +2454,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 </label>
               )}
 
-              <button className="wb-primary-button" type="submit">
+              <button className="wb-primary-button" type="submit" disabled={remoteBusy}>
                 <UiIcon name="spark" />
                 <span>导入并生成建议</span>
               </button>
@@ -2122,6 +2614,7 @@ function removeObjectReference(document: WorkspaceDocument, objectRef: string): 
     return {
       ...document,
       whiteboard_nodes: document.whiteboard_nodes.filter((node) => node.id !== nodeId),
+      whiteboard_edges: document.whiteboard_edges.filter((edge) => edge.from !== nodeId && edge.to !== nodeId),
       suggestions: document.suggestions.filter(
         (item) => !item.target_object_refs.some((ref) => ref.startsWith(`node:${nodeId}`))
       ),
@@ -2140,8 +2633,8 @@ function removeObjectReference(document: WorkspaceDocument, objectRef: string): 
             ...node,
             payload: {
               ...node.payload,
-              scene_xml: mutateSceneXml(node.payload.scene_xml, (root) => {
-                const child = findSceneChild(root, childId);
+              scene_xml: mutatePhyCanvasScene(node.payload.scene_xml, (root) => {
+                const child = findPhyCanvasChild(root, childId);
                 if (child) {
                   child.remove();
                 }
@@ -2155,6 +2648,39 @@ function removeObjectReference(document: WorkspaceDocument, objectRef: string): 
       ...document.selection_state,
       selected_object_refs: []
     }
+  };
+}
+
+function updatePhyCanvasChild(
+  document: WorkspaceDocument,
+  nodeId: string,
+  childId: string,
+  attrs: Partial<Record<"x" | "y" | "w" | "h" | "rotation", number>>
+): WorkspaceDocument {
+  return {
+    ...document,
+    whiteboard_nodes: document.whiteboard_nodes.map((node) =>
+      node.id === nodeId && node.kind === "phy_canvas"
+        ? {
+            ...node,
+            payload: {
+              ...node.payload,
+              scene_xml: mutatePhyCanvasScene(node.payload.scene_xml, (root) => {
+                const child = findPhyCanvasChild(root, childId);
+                if (!child) {
+                  return;
+                }
+
+                for (const [name, value] of Object.entries(attrs)) {
+                  if (typeof value === "number" && Number.isFinite(value)) {
+                    child.setAttribute(name, String(value));
+                  }
+                }
+              })
+            }
+          }
+        : node
+    )
   };
 }
 
@@ -2176,6 +2702,19 @@ function prefixForNode(node: WhiteboardNode): string {
   }
 }
 
+function getNextNodeZIndex(document: WorkspaceDocument, count: number): number[] {
+  const base = Math.max(0, ...document.whiteboard_nodes.map((item) => item.z_index));
+  return Array.from({ length: count }, (_, index) => base + index + 1);
+}
+
+function rebaseNodeStack(document: WorkspaceDocument, nodes: WhiteboardNode[]): WhiteboardNode[] {
+  const zIndices = getNextNodeZIndex(document, nodes.length);
+  return nodes.map((node, index) => ({
+    ...cloneNode(node),
+    z_index: zIndices[index] ?? node.z_index
+  }));
+}
+
 function getObjectWorldRect(document: WorkspaceDocument, objectRef: string): RectLike | null {
   const { nodeId, childId } = parseObjectRef(objectRef);
   const node = document.whiteboard_nodes.find((item) => item.id === nodeId);
@@ -2183,25 +2722,17 @@ function getObjectWorldRect(document: WorkspaceDocument, objectRef: string): Rec
     return null;
   }
   if (!childId) {
-    return node.rect;
+    return getRotatedNodeBounds(node.rect);
   }
   if (node.kind !== "phy_canvas") {
-    return node.rect;
+    return getRotatedNodeBounds(node.rect);
   }
 
   const child = parsePhyCanvasObjects(node).find((item) => item.id === childId);
   if (!child) {
-    return node.rect;
+    return getRotatedNodeBounds(node.rect);
   }
-  const scaleX = node.rect.w / node.payload.bounds.width;
-  const scaleY = node.rect.h / node.payload.bounds.height;
-  return {
-    x: node.rect.x + child.x * scaleX,
-    y: node.rect.y + child.y * scaleY,
-    w: Math.max(40, child.w * scaleX),
-    h: Math.max(28, child.h * scaleY),
-    rotation: child.rotation
-  };
+  return getPhyCanvasChildWorldBounds(node, child);
 }
 
 function worldRectToScreenRect(rect: RectLike, camera: CameraState) {
@@ -2213,11 +2744,12 @@ function worldRectToScreenRect(rect: RectLike, camera: CameraState) {
   };
 }
 
-function clampCamera(camera: CameraState): CameraState {
+function clampCamera(camera: CameraState, viewportSize: SizeLike = DEFAULT_VIEWPORT_SIZE): CameraState {
+  const zoom = clamp(camera.zoom, MIN_ZOOM, MAX_ZOOM);
   return {
-    x: clamp(camera.x, 0, Math.max(0, WORLD_WIDTH - 240 / camera.zoom)),
-    y: clamp(camera.y, 0, Math.max(0, WORLD_HEIGHT - 180 / camera.zoom)),
-    zoom: clamp(camera.zoom, MIN_ZOOM, MAX_ZOOM)
+    x: clamp(camera.x, 0, Math.max(0, WORLD_WIDTH - viewportSize.width / zoom)),
+    y: clamp(camera.y, 0, Math.max(0, WORLD_HEIGHT - viewportSize.height / zoom)),
+    zoom
   };
 }
 
@@ -2241,10 +2773,11 @@ function distanceBetween(first: Point, second: Point): number {
 }
 
 function getDocumentBounds(nodes: WhiteboardNode[]) {
-  const minX = Math.min(...nodes.map((node) => node.rect.x));
-  const minY = Math.min(...nodes.map((node) => node.rect.y));
-  const maxX = Math.max(...nodes.map((node) => node.rect.x + node.rect.w));
-  const maxY = Math.max(...nodes.map((node) => node.rect.y + node.rect.h));
+  const bounds = nodes.map((node) => getRotatedNodeBounds(node.rect));
+  const minX = Math.min(...bounds.map((node) => node.x));
+  const minY = Math.min(...bounds.map((node) => node.y));
+  const maxX = Math.max(...bounds.map((node) => node.x + node.w));
+  const maxY = Math.max(...bounds.map((node) => node.y + node.h));
   return {
     x: minX,
     y: minY,
@@ -2253,21 +2786,246 @@ function getDocumentBounds(nodes: WhiteboardNode[]) {
   };
 }
 
-function mutateSceneXml(sceneXml: string, updater: (root: Element) => void): string {
-  if (typeof DOMParser === "undefined") {
-    return sceneXml;
-  }
-  const document = new DOMParser().parseFromString(sceneXml, "application/xml");
-  const root = document.documentElement;
-  if (!root) {
-    return sceneXml;
-  }
-  updater(root);
-  return new XMLSerializer().serializeToString(root);
+function getRotatedNodeBounds(rect: RectLike): RectLike {
+  return pointsToRect(getRotatedRectPoints(rect, rect.rotation ?? 0, getRectCenter(rect)));
 }
 
-function findSceneChild(root: Element, childId: string) {
-  return Array.from(root.children).find((item) => item.getAttribute("id") === childId) ?? null;
+function getPhyCanvasChildWorldBounds(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  child: PhyCanvasObject
+): RectLike {
+  const localRect = getPhyCanvasChildLocalRect(node, child);
+  const localPoints = getRotatedRectPoints(localRect, child.rotation ?? 0, {
+    x: localRect.x,
+    y: localRect.y
+  });
+  return pointsToRect(localPoints.map((point) => phyCanvasLocalPointToWorld(node, point)));
+}
+
+function getPhyCanvasChildLocalRect(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  child: PhyCanvasObject
+): RectLike {
+  const frame = getPhyCanvasFrame(node);
+  return {
+    x: frame.inner.x + child.x * frame.scaleX,
+    y: frame.inner.y + child.y * frame.scaleY,
+    w: Math.max(20, child.w * frame.scaleX),
+    h: Math.max(18, child.h * frame.scaleY),
+    rotation: child.rotation
+  };
+}
+
+function getPhyCanvasFrame(node: Extract<WhiteboardNode, { kind: "phy_canvas" }>) {
+  const drawableWidth = Math.max(1, node.rect.w - PHY_CANVAS_PADDING * 2);
+  const drawableHeight = Math.max(
+    1,
+    node.rect.h - PHY_CANVAS_PADDING * 2 - PHY_CANVAS_HEADER_HEIGHT - PHY_CANVAS_HEADER_GAP
+  );
+  return {
+    inner: {
+      x: PHY_CANVAS_PADDING,
+      y: PHY_CANVAS_PADDING + PHY_CANVAS_HEADER_HEIGHT + PHY_CANVAS_HEADER_GAP,
+      w: drawableWidth,
+      h: drawableHeight
+    },
+    scaleX: drawableWidth / Math.max(node.payload.bounds.width, 1),
+    scaleY: drawableHeight / Math.max(node.payload.bounds.height, 1)
+  };
+}
+
+function worldPointToPhyCanvasScenePoint(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  worldPoint: Point
+): Point {
+  const frame = getPhyCanvasFrame(node);
+  const localPoint = worldPointToPhyCanvasLocalPoint(node, worldPoint);
+  return {
+    x: (localPoint.x - frame.inner.x) / frame.scaleX,
+    y: (localPoint.y - frame.inner.y) / frame.scaleY
+  };
+}
+
+function worldPointToPhyCanvasLocalPoint(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  worldPoint: Point
+): Point {
+  const unrotatedWorld = rotatePoint(worldPoint, -(node.rect.rotation ?? 0), getRectCenter(node.rect));
+  return {
+    x: unrotatedWorld.x - node.rect.x,
+    y: unrotatedWorld.y - node.rect.y
+  };
+}
+
+function phyCanvasLocalPointToWorld(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  localPoint: Point
+): Point {
+  return rotatePoint(
+    {
+      x: node.rect.x + localPoint.x,
+      y: node.rect.y + localPoint.y
+    },
+    node.rect.rotation ?? 0,
+    getRectCenter(node.rect)
+  );
+}
+
+function getRectCenter(rect: RectLike): Point {
+  return {
+    x: rect.x + rect.w / 2,
+    y: rect.y + rect.h / 2
+  };
+}
+
+function getRectPoints(rect: RectLike): Point[] {
+  return [
+    { x: rect.x, y: rect.y },
+    { x: rect.x + rect.w, y: rect.y },
+    { x: rect.x + rect.w, y: rect.y + rect.h },
+    { x: rect.x, y: rect.y + rect.h }
+  ];
+}
+
+function getRotatedRectPoints(rect: RectLike, angle: number, origin: Point): Point[] {
+  return getRectPoints(rect).map((point) => rotatePoint(point, angle, origin));
+}
+
+function rotatePoint(point: Point, angle: number, origin: Point): Point {
+  if (!angle) {
+    return point;
+  }
+
+  const radians = (angle * Math.PI) / 180;
+  const dx = point.x - origin.x;
+  const dy = point.y - origin.y;
+  return {
+    x: origin.x + dx * Math.cos(radians) - dy * Math.sin(radians),
+    y: origin.y + dx * Math.sin(radians) + dy * Math.cos(radians)
+  };
+}
+
+function pointsToRect(points: Point[]): RectLike {
+  const minX = Math.min(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const maxY = Math.max(...points.map((point) => point.y));
+  return {
+    x: minX,
+    y: minY,
+    w: maxX - minX,
+    h: maxY - minY
+  };
+}
+
+function snapSceneValue(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
+function minChildSize(kind: string) {
+  switch (kind) {
+    case "surface":
+      return { w: 72, h: 8 };
+    case "force":
+      return { w: 48, h: 12 };
+    case "label":
+      return { w: 42, h: 20 };
+    case "body":
+    default:
+      return { w: 48, h: 36 };
+  }
+}
+
+function sameCamera(left: CameraState, right: CameraState) {
+  return left.x === right.x && left.y === right.y && left.zoom === right.zoom;
+}
+
+function focusCameraOnRect(
+  rect: RectLike,
+  zoom: number,
+  viewportRect: DOMRect,
+  insets: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 }
+) {
+  const usableWidth = Math.max(120, viewportRect.width - insets.left - insets.right);
+  const usableHeight = Math.max(120, viewportRect.height - insets.top - insets.bottom);
+  const centerX = rect.x + rect.w / 2;
+  const centerY = rect.y + rect.h / 2;
+  return {
+    x: centerX - usableWidth / zoom / 2 - (insets.left - insets.right) / zoom / 2,
+    y: centerY - usableHeight / zoom / 2 - (insets.top - insets.bottom) / zoom / 2,
+    zoom
+  };
+}
+
+function getOverlaySafeInsets(
+  viewportRect: DOMRect | null,
+  topbarRect: DOMRect | null,
+  dockRect: DOMRect | null,
+  sidebarRect: DOMRect | null
+): EdgeInsets {
+  const insets: EdgeInsets = { top: 16, right: 16, bottom: 16, left: 16 };
+  if (!viewportRect) {
+    return insets;
+  }
+
+  if (topbarRect) {
+    insets.top = Math.max(insets.top, topbarRect.bottom - viewportRect.top + 12);
+  }
+  if (dockRect) {
+    if (dockRect.height > dockRect.width) {
+      insets.left = Math.max(insets.left, dockRect.right - viewportRect.left + 12);
+    } else {
+      insets.bottom = Math.max(insets.bottom, viewportRect.bottom - dockRect.top + 12);
+    }
+  }
+  if (sidebarRect) {
+    if (sidebarRect.height > sidebarRect.width) {
+      insets.right = Math.max(insets.right, viewportRect.right - sidebarRect.left + 12);
+    } else {
+      insets.bottom = Math.max(insets.bottom, viewportRect.bottom - sidebarRect.top + 12);
+    }
+  }
+
+  return insets;
+}
+
+function clampMarkerPosition(left: number, top: number, viewportRect: DOMRect, insets: EdgeInsets) {
+  const size = 34;
+  return {
+    left: clamp(left, insets.left, viewportRect.width - insets.right - size),
+    top: clamp(top, insets.top, viewportRect.height - insets.bottom - size)
+  };
+}
+
+function getSelectionMenuPosition(rect: ScreenRect, viewportRect: DOMRect, insets: EdgeInsets) {
+  const menuWidth = 220;
+  const menuHeight = 54;
+  const centerX = clamp(
+    rect.left + rect.width / 2,
+    insets.left + menuWidth / 2,
+    viewportRect.width - insets.right - menuWidth / 2
+  );
+  const placeBelow = rect.top - insets.top < menuHeight + 12;
+  return {
+    left: centerX,
+    top: placeBelow
+      ? Math.min(viewportRect.height - insets.bottom - menuHeight, rect.top + rect.height + 14)
+      : Math.max(insets.top + menuHeight, rect.top - 18),
+    placement: placeBelow ? ("below" as const) : ("above" as const)
+  };
+}
+
+function getMoreMenuPosition(rect: ScreenRect, viewportRect: DOMRect, insets: EdgeInsets) {
+  const menuWidth = 182;
+  const menuHeight = 180;
+  return {
+    left: clamp(
+      rect.left + rect.width / 2,
+      insets.left + menuWidth / 2,
+      viewportRect.width - insets.right - menuWidth / 2
+    ),
+    top: clamp(rect.top + rect.height + 22, insets.top + 48, viewportRect.height - insets.bottom - menuHeight)
+  };
 }
 
 function richBlockDefaultTitle(node: Extract<WhiteboardNode, { kind: "rich_block" }>) {

@@ -27,6 +27,9 @@ export interface PhyCanvasObject {
   attrs: Record<string, string>;
 }
 
+const LABEL_DEFAULT_WIDTH = 88;
+const LABEL_DEFAULT_HEIGHT = 26;
+
 export function makeNodeObjectRef(nodeId: string): string {
   return `node:${nodeId}`;
 }
@@ -110,17 +113,7 @@ export function documentToRuntimeShapes(document: WorkspaceDocument): BoardRunti
 }
 
 export function parsePhyCanvasObjects(node: PhyCanvasNode): PhyCanvasObject[] {
-  if (typeof DOMParser === "undefined") {
-    return [];
-  }
-
-  const sceneXml = String(node.payload.scene_xml ?? "").trim();
-  if (!sceneXml) {
-    return [];
-  }
-
-  const document = new DOMParser().parseFromString(sceneXml, "application/xml");
-  const root = document.documentElement;
+  const root = readPhyCanvasSceneRoot(String(node.payload.scene_xml ?? ""));
   if (!root) {
     return [];
   }
@@ -137,8 +130,8 @@ export function parsePhyCanvasObjects(node: PhyCanvasNode): PhyCanvasObject[] {
       objectRef: makeChildObjectRef(node.id, attrs.id ?? child.tagName),
       x: toNumber(attrs.x),
       y: toNumber(attrs.y),
-      w: toNumber(attrs.w, child.tagName === "label" ? 88 : 0),
-      h: toNumber(attrs.h, child.tagName === "label" ? 26 : 0),
+      w: toNumber(attrs.w, child.tagName === "label" ? LABEL_DEFAULT_WIDTH : 0),
+      h: toNumber(attrs.h, child.tagName === "label" ? LABEL_DEFAULT_HEIGHT : 0),
       rotation: toNumber(attrs.rotation),
       label: attrs.label,
       text: attrs.text,
@@ -152,13 +145,21 @@ export function applyBoardPatchLocally(document: WorkspaceDocument, patch: Board
   for (const node of patch.upsert_nodes) {
     nodeMap.set(node.id, node);
   }
+
+  const removedNodeIds = new Set(patch.remove_node_ids);
   for (const nodeId of patch.remove_node_ids) {
     nodeMap.delete(nodeId);
   }
 
-  const edgeMap = new Map(document.whiteboard_edges.map((edge) => [edge.id, edge] as const));
+  const edgeMap = new Map(
+    document.whiteboard_edges
+      .filter((edge) => !removedNodeIds.has(edge.from) && !removedNodeIds.has(edge.to))
+      .map((edge) => [edge.id, edge] as const)
+  );
   for (const edge of patch.upsert_edges) {
-    edgeMap.set(edge.id, edge);
+    if (!removedNodeIds.has(edge.from) && !removedNodeIds.has(edge.to)) {
+      edgeMap.set(edge.id, edge);
+    }
   }
   for (const edgeId of patch.remove_edge_ids) {
     edgeMap.delete(edgeId);
@@ -175,6 +176,21 @@ export function applyBoardPatchLocally(document: WorkspaceDocument, patch: Board
   }
 
   return nextDocument;
+}
+
+export function mutatePhyCanvasScene(sceneXml: string, updater: (root: Element) => void): string {
+  const root = readPhyCanvasSceneRoot(sceneXml);
+  if (!root) {
+    return sceneXml;
+  }
+
+  updater(root);
+  normalizeSceneChildren(root);
+  return new XMLSerializer().serializeToString(root);
+}
+
+export function findPhyCanvasChild(root: Element, childId?: string): Element | null {
+  return findSceneChild(root, childId);
 }
 
 function applyObjectMutation(
@@ -209,32 +225,26 @@ function applyObjectMutation(
     return document;
   }
 
-  const xml = String(targetNode.payload.scene_xml ?? "").trim();
-  if (!xml) {
-    return document;
-  }
-
-  const sceneDocument = new DOMParser().parseFromString(xml, "application/xml");
-  const root = sceneDocument.documentElement;
+  const root = readPhyCanvasSceneRoot(String(targetNode.payload.scene_xml ?? ""));
   if (!root) {
     return document;
   }
 
   if (mutation.op === "phy_canvas_upsert_child") {
-    const childXml = String(mutation.child_xml ?? "").trim();
-    if (!childXml) {
+    const childElement = readXmlElement(String(mutation.child_xml ?? ""));
+    if (!childElement) {
       return document;
     }
-    const childDocument = new DOMParser().parseFromString(childXml, "application/xml");
-    const childElement = childDocument.documentElement;
-    const nextChildId = mutation.child_id ?? childElement?.getAttribute("id") ?? undefined;
+    const nextChildId =
+      mutation.child_id ??
+      childElement.getAttribute("id")?.trim() ??
+      createNormalizedChildId(childElement.tagName, Array.from(root.children).length);
+    childElement.setAttribute("id", nextChildId);
     const existing = findSceneChild(root, nextChildId);
     if (existing) {
       existing.remove();
     }
-    if (childElement) {
-      root.append(childElement);
-    }
+    root.append(childElement.cloneNode(true));
   } else if (mutation.op === "phy_canvas_remove_child") {
     const existing = findSceneChild(root, childId);
     if (existing) {
@@ -277,6 +287,7 @@ function findSceneChild(root: Element, childId?: string): Element | null {
     return null;
   }
 
+  normalizeSceneChildren(root);
   return (
     Array.from(root.children).find((child) => child.getAttribute("id") === childId) ??
     null
@@ -303,4 +314,68 @@ function truncateText(text: string): string {
 function toNumber(value: string | undefined, fallback = 0): number {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function readPhyCanvasSceneRoot(sceneXml: string): Element | null {
+  if (typeof DOMParser === "undefined") {
+    return null;
+  }
+
+  const normalizedXml = sceneXml.trim();
+  if (!normalizedXml) {
+    return null;
+  }
+
+  const document = new DOMParser().parseFromString(normalizedXml, "application/xml");
+  if (document.querySelector("parsererror")) {
+    return null;
+  }
+
+  const root = document.documentElement;
+  if (!root) {
+    return null;
+  }
+
+  normalizeSceneChildren(root);
+  return root;
+}
+
+function readXmlElement(xml: string): Element | null {
+  if (typeof DOMParser === "undefined") {
+    return null;
+  }
+
+  const normalizedXml = xml.trim();
+  if (!normalizedXml) {
+    return null;
+  }
+
+  const document = new DOMParser().parseFromString(normalizedXml, "application/xml");
+  if (document.querySelector("parsererror")) {
+    return null;
+  }
+
+  return document.documentElement;
+}
+
+function normalizeSceneChildren(root: Element) {
+  const seenIds = new Set<string>();
+  Array.from(root.children).forEach((child, index) => {
+    const rawId = child.getAttribute("id")?.trim();
+    const baseId = rawId || createNormalizedChildId(child.tagName, index);
+    let nextId = baseId;
+    let suffix = 2;
+    while (seenIds.has(nextId)) {
+      nextId = `${baseId}-${suffix}`;
+      suffix += 1;
+    }
+    if (child.getAttribute("id") !== nextId) {
+      child.setAttribute("id", nextId);
+    }
+    seenIds.add(nextId);
+  });
+}
+
+function createNormalizedChildId(tagName: string, index: number) {
+  return `${tagName.toLowerCase()}-${index + 1}`;
 }
