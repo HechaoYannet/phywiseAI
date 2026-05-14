@@ -191,12 +191,30 @@ export interface BoardPatch {
   remove_node_ids: string[];
   upsert_edges: WhiteboardEdge[];
   remove_edge_ids: string[];
+  object_mutations: BoardObjectMutation[];
+}
+
+export type BoardObjectRef = string;
+
+export interface BoardObjectMutation {
+  op:
+    | "replace_rich_block_content"
+    | "phy_canvas_upsert_child"
+    | "phy_canvas_remove_child"
+    | "phy_canvas_set_attr";
+  object_ref: BoardObjectRef;
+  child_id?: string;
+  attr_name?: string;
+  value?: string | number | boolean | null;
+  content?: string;
+  content_format?: "markdown_math";
+  child_xml?: string;
 }
 
 export interface BoardSuggestion {
   id: string;
   kind: "diagram_rebuild" | "force_completion" | "equation_hint" | "next_step" | "label_fix";
-  target_node_ids: string[];
+  target_object_refs: BoardObjectRef[];
   patch: BoardPatch;
   reason: string;
   status: "pending" | "accepted" | "rejected";
@@ -215,7 +233,7 @@ export interface WorkspaceDocument {
   };
   simulation_bindings: SimulationBinding[];
   selection_state: {
-    selected_node_ids: string[];
+    selected_object_refs: BoardObjectRef[];
     focused_subquestion_id?: string;
     active_tool?: string;
   };
@@ -288,14 +306,14 @@ export interface AnalyzeSourceInput {
 }
 
 export interface AnalyzeBoardInput {
-  selected_node_ids: string[];
+  selected_object_refs: BoardObjectRef[];
 }
 
 export interface TutorTurnInput {
   session_id: string;
   workspace_id: string;
   student_input: string;
-  selected_node_ids: string[];
+  selected_object_refs: BoardObjectRef[];
 }
 
 export interface RebuildSimulationInput {

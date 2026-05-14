@@ -21,6 +21,14 @@ from phywise_api.schemas import (
 )
 
 NOW = "2026-05-13T00:00:00.000Z"
+DEMO_SCENE_XML = (
+    '<phy-canvas scene-kind="force_analysis" version="1" width="360" height="240">'
+    '<body id="body-main" x="128" y="74" w="92" h="62" rotation="0" label="物块" shape="block" />'
+    '<surface id="surface-main" x="78" y="154" w="210" h="12" rotation="-18" label="斜面" angle="theta" surface-kind="plane" />'
+    '<force id="force-normal" x="206" y="88" w="100" h="14" rotation="-108" label="N" role="normal" target="body-main" />'
+    '<label id="label-angle" x="242" y="160" text="theta" />'
+    "</phy-canvas>"
+)
 
 
 def demo_asset() -> SourceAsset:
@@ -98,7 +106,7 @@ def demo_parse_result() -> ProblemParseResult:
                 kind="body",
                 description="位于斜面上的方块",
                 confidence=0.98,
-                linked_node_id="body-1",
+                linked_node_id="diagram-node-1",
             )
         ],
         knowledge_links=demo_knowledge_links(),
@@ -169,44 +177,32 @@ def demo_workspace() -> WorkspaceDocument:
                 "source_refs": ["asset-demo-001"],
             },
             {
-                "id": "body-node-1",
-                "kind": "physics_body",
-                "rect": {"x": 480, "y": 250, "w": 120, "h": 84},
+                "id": "diagram-node-1",
+                "kind": "phy_canvas",
+                "rect": {"x": 460, "y": 220, "w": 360, "h": 240},
                 "payload": {
-                    "label": "物块",
-                    "body_shape": "block",
-                    "notes": "静止",
-                },
-                "anchors": [{"id": "center", "x": 0.5, "y": 0.5, "label": "中心"}],
-                "layer": "student",
-                "z_index": 3,
-                "semantic_role": "main-body",
-                "source_refs": ["asset-demo-001"],
-            },
-            {
-                "id": "surface-node-1",
-                "kind": "surface_line",
-                "rect": {"x": 420, "y": 360, "w": 240, "h": 14, "rotation": -18},
-                "payload": {
-                    "label": "斜面",
-                    "angle_text": "theta",
-                    "surface_kind": "plane",
+                    "scene_kind": "force_analysis",
+                    "scene_xml": DEMO_SCENE_XML,
+                    "version": 1,
+                    "bounds": {"width": 360, "height": 240},
+                    "summary": "斜面静止受力图",
                 },
                 "anchors": [],
                 "layer": "student",
-                "z_index": 2,
-                "semantic_role": "inclined-plane",
+                "z_index": 3,
+                "semantic_role": "force-scene",
                 "source_refs": ["asset-demo-001"],
             },
             {
                 "id": "condition-node-1",
-                "kind": "condition_card",
-                "rect": {"x": 820, "y": 80, "w": 260, "h": 132},
+                "kind": "rich_block",
+                "rect": {"x": 860, "y": 88, "w": 280, "h": 120},
                 "payload": {
-                    "label": "已知状态",
-                    "value": "物块静止在粗糙斜面上",
-                    "source": "ocr",
-                    "confidence": 0.93,
+                    "title": "已知条件",
+                    "content": "物块静止在粗糙斜面上\nm, theta, mu",
+                    "content_format": "markdown_math",
+                    "block_role": "condition",
+                    "status": "checked",
                 },
                 "anchors": [],
                 "layer": "student",
@@ -216,11 +212,13 @@ def demo_workspace() -> WorkspaceDocument:
             },
             {
                 "id": "formula-node-1",
-                "kind": "formula_block",
-                "rect": {"x": 820, "y": 250, "w": 300, "h": 140},
+                "kind": "rich_block",
+                "rect": {"x": 860, "y": 244, "w": 320, "h": 150},
                 "payload": {
-                    "latex": r"\sum F_{\parallel}=0",
-                    "explanation": "先沿斜面方向列平衡关系。",
+                    "title": "推导",
+                    "content": r"沿斜面方向：`\sum F_{\parallel}=0`",
+                    "content_format": "markdown_math",
+                    "block_role": "derivation",
                     "status": "draft",
                 },
                 "anchors": [],
@@ -236,13 +234,13 @@ def demo_workspace() -> WorkspaceDocument:
         simulation_bindings=[
             SimulationBinding(
                 id="binding-1",
-                source_node_id="body-node-1",
+                source_node_id="diagram-node-1",
                 target_object_id="sim-object-1",
                 property="tilt_angle",
             )
         ],
         selection_state={
-            "selected_node_ids": ["formula-node-1"],
+            "selected_object_refs": ["node:formula-node-1"],
             "focused_subquestion_id": "subq-1",
             "active_tool": "select",
         },
@@ -261,31 +259,20 @@ def demo_workspace() -> WorkspaceDocument:
             {
                 "id": "suggestion-demo-1",
                 "kind": "force_completion",
-                "target_node_ids": ["body-node-1"],
+                "target_object_refs": ["node:diagram-node-1#child:body-main"],
                 "patch": {
-                    "upsert_nodes": [
-                        {
-                            "id": "force-node-1",
-                            "kind": "force_arrow",
-                            "rect": {"x": 540, "y": 258, "w": 120, "h": 18, "rotation": 90},
-                            "payload": {
-                                "label": "G",
-                                "magnitude_text": "mg",
-                                "direction_deg": 90,
-                                "target_node_id": "body-node-1",
-                            },
-                            "anchors": [{"id": "base", "x": 0, "y": 0.5}, {"id": "tip", "x": 1, "y": 0.5}],
-                            "layer": "ai",
-                            "z_index": 5,
-                            "locked": False,
-                            "semantic_role": "gravity",
-                            "source_refs": ["asset-demo-001"],
-                            "metadata": {},
-                        }
-                    ],
+                    "upsert_nodes": [],
                     "remove_node_ids": [],
                     "upsert_edges": [],
                     "remove_edge_ids": [],
+                    "object_mutations": [
+                        {
+                            "op": "phy_canvas_upsert_child",
+                            "object_ref": "node:diagram-node-1",
+                            "child_id": "force-gravity",
+                            "child_xml": '<force id="force-gravity" x="166" y="74" w="102" h="14" rotation="90" label="G" magnitude="mg" role="gravity" target="body-main" />',
+                        }
+                    ],
                 },
                 "reason": "题目是静止斜面受力分析，通常先补全重力、支持力和摩擦力方向判断。",
                 "status": "pending",
@@ -335,7 +322,7 @@ def demo_simulation_scene() -> SimulationScene:
         bindings=[
             SimulationBinding(
                 id="binding-1",
-                source_node_id="sim-node-1",
+                source_node_id="diagram-node-1",
                 target_object_id="sim-object-1",
                 property="angle_deg",
             )

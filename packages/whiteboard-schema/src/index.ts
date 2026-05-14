@@ -1,11 +1,7 @@
 export type WhiteboardNodeKind =
   | "source_image"
-  | "free_text"
-  | "formula_block"
-  | "physics_body"
-  | "surface_line"
-  | "force_arrow"
-  | "condition_card"
+  | "rich_block"
+  | "phy_canvas"
   | "ai_annotation";
 
 export type WhiteboardLayer = "source" | "student" | "ai" | "overlay";
@@ -65,59 +61,28 @@ export type SourceImageNode = WhiteboardNodeBase<
   }
 >;
 
-export type FreeTextNode = WhiteboardNodeBase<
-  "free_text",
+export type RichBlockNode = WhiteboardNodeBase<
+  "rich_block",
   {
-    text: string;
-    markdown?: string;
-  }
->;
-
-export type FormulaBlockNode = WhiteboardNodeBase<
-  "formula_block",
-  {
-    latex: string;
-    explanation?: string;
+    content: string;
+    content_format: "markdown_math";
+    block_role: "note" | "derivation" | "equation" | "condition";
     status: "draft" | "checked" | "final";
+    title?: string;
   }
 >;
 
-export type PhysicsBodyNode = WhiteboardNodeBase<
-  "physics_body",
+export type PhyCanvasNode = WhiteboardNodeBase<
+  "phy_canvas",
   {
-    label: string;
-    body_shape: "block" | "particle" | "cart" | "custom";
-    notes?: string;
-  }
->;
-
-export type SurfaceLineNode = WhiteboardNodeBase<
-  "surface_line",
-  {
-    label?: string;
-    angle_text?: string;
-    surface_kind: "plane" | "ground" | "wall";
-  }
->;
-
-export type ForceArrowNode = WhiteboardNodeBase<
-  "force_arrow",
-  {
-    label: string;
-    magnitude_text?: string;
-    direction_deg: number;
-    target_node_id?: string;
-    notes?: string;
-  }
->;
-
-export type ConditionCardNode = WhiteboardNodeBase<
-  "condition_card",
-  {
-    label: string;
-    value: string;
-    source: "ocr" | "student" | "teacher" | "agent";
-    confidence?: number;
+    scene_kind: "force_analysis";
+    scene_xml: string;
+    version: number;
+    bounds: {
+      width: number;
+      height: number;
+    };
+    summary?: string;
   }
 >;
 
@@ -133,12 +98,8 @@ export type AiAnnotationNode = WhiteboardNodeBase<
 
 export type WhiteboardNode =
   | SourceImageNode
-  | FreeTextNode
-  | FormulaBlockNode
-  | PhysicsBodyNode
-  | SurfaceLineNode
-  | ForceArrowNode
-  | ConditionCardNode
+  | RichBlockNode
+  | PhyCanvasNode
   | AiAnnotationNode;
 
 export interface WhiteboardDocumentSnapshot {

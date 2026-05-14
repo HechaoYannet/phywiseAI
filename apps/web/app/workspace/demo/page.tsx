@@ -15,21 +15,17 @@ const assignment = createDemoAssignment();
 
 function getNodeTitle(node: WhiteboardNode): string {
   switch (node.kind) {
-    case "condition_card":
-      return String(node.payload.label ?? "条件");
-    case "formula_block":
-      return String(node.payload.latex ?? "公式");
+    case "rich_block":
+      return String(node.payload.title ?? "内容块");
     case "ai_annotation":
       return String(node.payload.title ?? "AI 批注");
-    case "physics_body":
-      return String(node.payload.label ?? "物体");
-    case "surface_line":
-      return String(node.payload.label ?? "接触面");
-    case "force_arrow":
-      return String(node.payload.label ?? "力");
-    default:
-      return node.kind;
+    case "phy_canvas":
+      return String(node.payload.summary ?? "受力分析图");
+    case "source_image":
+      return String(node.payload.caption ?? node.payload.alt ?? "题图");
   }
+
+  return "节点";
 }
 
 export default function DemoWorkspacePage() {

@@ -101,7 +101,7 @@ def test_workspace_source_analysis_and_suggestion_flow(client: TestClient) -> No
     attached = attach_response.json()
 
     assert attach_response.status_code == 200
-    assert any(node["kind"] == "free_text" for node in attached["whiteboard_nodes"])
+    assert any(node["kind"] == "rich_block" for node in attached["whiteboard_nodes"])
     assert attached["source_asset_id"]
 
     analyzed_response = client.post(f"/api/workspaces/{workspace_id}/analyze-source", json={})
@@ -120,11 +120,11 @@ def test_workspace_source_analysis_and_suggestion_flow(client: TestClient) -> No
 
     assert accept_response.status_code == 200
     assert any(item["id"] == diagram_suggestion["id"] and item["status"] == "accepted" for item in accepted["suggestions"])
-    assert any(node["kind"] == "physics_body" for node in accepted["whiteboard_nodes"])
+    assert any(node["kind"] == "phy_canvas" for node in accepted["whiteboard_nodes"])
 
     board_response = client.post(
         f"/api/workspaces/{workspace_id}/analyze-board",
-        json={"selected_node_ids": []},
+        json={"selected_object_refs": []},
     )
     board = board_response.json()
 

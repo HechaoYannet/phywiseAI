@@ -160,12 +160,8 @@ class WhiteboardNode(BaseModel):
     id: str
     kind: Literal[
         "source_image",
-        "free_text",
-        "formula_block",
-        "physics_body",
-        "surface_line",
-        "force_arrow",
-        "condition_card",
+        "rich_block",
+        "phy_canvas",
         "ai_annotation",
     ]
     rect: WhiteboardRect
@@ -184,12 +180,13 @@ class BoardPatch(BaseModel):
     remove_node_ids: list[str] = Field(default_factory=list)
     upsert_edges: list[WhiteboardEdge] = Field(default_factory=list)
     remove_edge_ids: list[str] = Field(default_factory=list)
+    object_mutations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class BoardSuggestion(BaseModel):
     id: str
     kind: Literal["diagram_rebuild", "force_completion", "equation_hint", "next_step", "label_fix"]
-    target_node_ids: list[str] = Field(default_factory=list)
+    target_object_refs: list[str] = Field(default_factory=list)
     patch: BoardPatch = Field(default_factory=BoardPatch)
     reason: str
     status: Literal["pending", "accepted", "rejected"]
@@ -321,14 +318,14 @@ class AnalyzeSourceInput(BaseModel):
 
 
 class AnalyzeBoardInput(BaseModel):
-    selected_node_ids: list[str] = Field(default_factory=list)
+    selected_object_refs: list[str] = Field(default_factory=list)
 
 
 class TutorTurnInput(BaseModel):
     session_id: str
     workspace_id: str
     student_input: str
-    selected_node_ids: list[str] = Field(default_factory=list)
+    selected_object_refs: list[str] = Field(default_factory=list)
 
 
 class RebuildSimulationInput(BaseModel):
