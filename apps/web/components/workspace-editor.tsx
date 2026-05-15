@@ -1719,8 +1719,10 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       commitWorkspace(
         (document) =>
           updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
-            x: snapSceneValue(interaction.originChild.x + (pointerScene.x - interaction.originPointerScene.x)),
-            y: snapSceneValue(interaction.originChild.y + (pointerScene.y - interaction.originPointerScene.y))
+            ...clampPhyCanvasChildAttributes(node, interaction.originChild, {
+              x: interaction.originChild.x + (pointerScene.x - interaction.originPointerScene.x),
+              y: interaction.originChild.y + (pointerScene.y - interaction.originPointerScene.y)
+            })
           }),
         { persist: true }
       );
@@ -1744,7 +1746,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
             document,
             interaction.nodeId,
             interaction.childId,
-            getResizedChildAttributes(interaction.originChild, interaction.originGeometry, resized)
+            clampPhyCanvasChildAttributes(
+              node,
+              interaction.originChild,
+              getResizedChildAttributes(interaction.originChild, interaction.originGeometry, resized)
+            )
           ),
         { persist: true }
       );
@@ -1764,9 +1770,14 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       interaction.didMutate = true;
       commitWorkspace(
         (document) =>
-          updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
-            rotation: snapSceneValue(nextRotation)
-          }),
+          updatePhyCanvasChild(
+            document,
+            interaction.nodeId,
+            interaction.childId,
+            clampPhyCanvasChildAttributes(node, interaction.originChild, {
+              rotation: nextRotation
+            })
+          ),
         { persist: true }
       );
     }
@@ -2420,7 +2431,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                     <svg
                       className="wb-phy-canvas__svg"
                       viewBox={`0 0 ${node.payload.bounds.width} ${node.payload.bounds.height}`}
-                      preserveAspectRatio="none"
+                      preserveAspectRatio="xMidYMid meet"
                     >
                       {parsePhyCanvasObjects(node).map((item) => {
                         const childSelected = selectedObjectRef === item.objectRef;
@@ -3144,6 +3155,78 @@ function minChildSize(kind: string) {
     default:
       return { w: 48, h: 36 };
   }
+}
+
+function clampPhyCanvasChildAttributes(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  child: PhyCanvasObject,
+  attributes: Partial<Pick<PhyCanvasObject, "x" | "y" | "w" | "h" | "rotation">>
+) {
+  const bounds = {
+    width: Math.max(1, node.payload.bounds.width),
+    height: Math.max(1, node.payload.bounds.height)
+  };
+  const minimumSize = minChildSize(child.kind);
+  const nextChild: PhyCanvasObject = {
+    ...child,
+    x: attributes.x ?? child.x,
+    y: attributes.y ?? child.y,
+    w: attributes.w ?? child.w,
+    h: attributes.h ?? child.h,
+    rotation: attributes.rotation ?? child.rotation
+  };
+
+  nextChild.w = clamp(nextChild.w, minimumSize.w, bounds.width);
+  nextChild.h = clamp(nextChild.h, minimumSize.h, bounds.height);
+
+  let geometry = getPhyCanvasChildSceneGeometry(nextChild);
+  if ((typeof attributes.w === "number" || typeof attributes.h === "number") && child.kind !== "label") {
+    const fitScale = Math.min(
+      bounds.width / Math.max(geometry.aabb.w, 1),
+      bounds.height / Math.max(geometry.aabb.h, 1),
+      1
+    );
+    if (fitScale < 1) {
+      nextChild.w = Math.max(minimumSize.w, nextChild.w * fitScale);
+      nextChild.h = Math.max(minimumSize.h, nextChild.h * fitScale);
+      geometry = getPhyCanvasChildSceneGeometry(nextChild);
+    }
+  }
+  const dx = clampAabbOffset(geometry.aabb.x, geometry.aabb.x + geometry.aabb.w, bounds.width);
+  const dy = clampAabbOffset(geometry.aabb.y, geometry.aabb.y + geometry.aabb.h, bounds.height);
+  nextChild.x += dx;
+  nextChild.y += dy;
+
+  const nextAttributes: Partial<Record<"x" | "y" | "w" | "h" | "rotation", number>> = {
+    ...attributes,
+    x: snapSceneValue(nextChild.x),
+    y: snapSceneValue(nextChild.y)
+  };
+
+  if (typeof attributes.w === "number" || nextChild.w !== child.w) {
+    nextAttributes.w = snapSceneValue(nextChild.w);
+  }
+  if (typeof attributes.h === "number" || nextChild.h !== child.h) {
+    nextAttributes.h = snapSceneValue(nextChild.h);
+  }
+  if (typeof attributes.rotation === "number") {
+    nextAttributes.rotation = snapSceneValue(nextChild.rotation);
+  }
+
+  return nextAttributes;
+}
+
+function clampAabbOffset(min: number, max: number, limit: number) {
+  if (max - min > limit) {
+    return limit / 2 - (min + max) / 2;
+  }
+  if (min < 0) {
+    return -min;
+  }
+  if (max > limit) {
+    return limit - max;
+  }
+  return 0;
 }
 
 function sameCamera(left: CameraState, right: CameraState) {

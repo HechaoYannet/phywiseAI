@@ -178,15 +178,21 @@ export function getPhyCanvasFrame(node: Extract<WhiteboardNode, { kind: "phy_can
     1,
     node.rect.h - PHY_CANVAS_PADDING * 2 - PHY_CANVAS_HEADER_HEIGHT - PHY_CANVAS_HEADER_GAP
   );
+  const sceneWidth = Math.max(node.payload.bounds.width, 1);
+  const sceneHeight = Math.max(node.payload.bounds.height, 1);
+  const scale = Math.min(drawableWidth / sceneWidth, drawableHeight / sceneHeight);
+  const sceneWidthPx = sceneWidth * scale;
+  const sceneHeightPx = sceneHeight * scale;
+
   return {
     inner: {
-      x: PHY_CANVAS_PADDING,
-      y: PHY_CANVAS_PADDING + PHY_CANVAS_HEADER_HEIGHT + PHY_CANVAS_HEADER_GAP,
-      w: drawableWidth,
-      h: drawableHeight
+      x: PHY_CANVAS_PADDING + (drawableWidth - sceneWidthPx) / 2,
+      y: PHY_CANVAS_PADDING + PHY_CANVAS_HEADER_HEIGHT + PHY_CANVAS_HEADER_GAP + (drawableHeight - sceneHeightPx) / 2,
+      w: sceneWidthPx,
+      h: sceneHeightPx
     },
-    scaleX: drawableWidth / Math.max(node.payload.bounds.width, 1),
-    scaleY: drawableHeight / Math.max(node.payload.bounds.height, 1)
+    scaleX: scale,
+    scaleY: scale
   };
 }
 
