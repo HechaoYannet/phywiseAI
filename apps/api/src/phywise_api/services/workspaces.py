@@ -376,6 +376,22 @@ def _node_text(node: WhiteboardNode) -> str:
     return f"{node.payload.get('title', '')} {node.payload.get('text', '')} {node.semantic_role or ''}"
 
 
+def _compact_text(value: str) -> str:
+    return " ".join(value.split())
+
+
+def _has_equivalent_source_text(document: WorkspaceDocument, text: str) -> bool:
+    target = _compact_text(text)
+    if not target:
+        return False
+    return any(
+        node.kind == "rich_block"
+        and node.semantic_role == "problem-source"
+        and _compact_text(str(node.payload.get("content", ""))) == target
+        for node in document.whiteboard_nodes
+    )
+
+
 def _is_static_board(document: WorkspaceDocument) -> bool:
     combined = " ".join(_node_text(node) for node in document.whiteboard_nodes).lower()
     return any(token in combined for token in ("静止", "平衡", "合力为0", "sum f", "∑f"))
@@ -509,7 +525,10 @@ def _append_source_nodes_from_asset(document: WorkspaceDocument, asset: SourceAs
 def _apply_parse_context(document: WorkspaceDocument, parse_result: ProblemParseResult) -> WorkspaceDocument:
     next_document = _clone_document(document)
     source_refs = [parse_result.source_asset_id]
-    if not any(node.semantic_role == "source-summary" for node in next_document.whiteboard_nodes):
+    should_add_summary = not any(
+        node.semantic_role == "source-summary" for node in next_document.whiteboard_nodes
+    ) and not _has_equivalent_source_text(next_document, parse_result.stem)
+    if should_add_summary:
         next_document.whiteboard_nodes.append(
             _rich_block(
                 node_id=make_id("summary"),

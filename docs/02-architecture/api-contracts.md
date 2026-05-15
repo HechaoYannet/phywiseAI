@@ -28,8 +28,8 @@
 - `SourceAsset`: 记录导入资源的类型、存储键、预览页和来源方式。
 - `ProblemParseResult`: 表示题干、条件、小问和 provider trace 的结构化解析结果。
 - `WorkspaceDocument`: 跨端业务真相，包含白板节点、视口、掌握度、suggestions 和修订信息。
-- `BoardSuggestion`: AI 只能输出的建议结构，包含 `kind`、`target_node_ids`、`patch`、`reason`、`status`。
-- `BoardPatch`: 工作台节点和边的增删改补丁，不允许携带 renderer 私有格式。
+- `BoardSuggestion`: AI 只能输出的建议结构，包含 `kind`、`target_object_refs`、`patch`、`reason`、`status`。
+- `BoardPatch`: 工作台节点、边和 `phy_canvas` 子对象的增删改补丁，不允许携带 renderer 私有格式。
 
 ## 设计约束
 

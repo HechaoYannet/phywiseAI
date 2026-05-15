@@ -4,6 +4,7 @@ import type { BoardSuggestion, WorkspaceDocument } from "@phywise/contracts";
 import type { RichBlockNode, WhiteboardNode } from "@phywise/whiteboard-schema";
 import { makeNodeId } from "@phywise/whiteboard-schema";
 import type {
+  CSSProperties,
   FormEvent,
   MouseEvent as ReactMouseEvent,
   PointerEvent as ReactPointerEvent,
@@ -32,6 +33,25 @@ import {
   parsePhyCanvasObjects,
   sortNodes
 } from "../lib/board-adapter";
+import {
+  getDocumentBounds,
+  getMoreMenuAnchor,
+  getObjectTransformGeometry,
+  getObjectWorldRect,
+  getPhyCanvasChildRotationOrigin,
+  getPhyCanvasChildSceneGeometry,
+  getSelectionMenuAnchor,
+  projectTransformGeometry,
+  resizeTransformGeometry,
+  type PointLike as Point,
+  type RectLike,
+  type ResizeHandleId,
+  type ScreenRect,
+  type ScreenTransformGeometry,
+  type TransformGeometry,
+  worldPointToPhyCanvasScenePoint,
+  worldRectToScreenRect
+} from "../lib/board-geometry";
 import { type BoardTool, createForceAnalysisTemplate, createNodeFromTool } from "../lib/workspace-presets";
 
 interface WorkspaceEditorProps {
@@ -42,26 +62,6 @@ interface CameraState {
   x: number;
   y: number;
   zoom: number;
-}
-
-interface Point {
-  x: number;
-  y: number;
-}
-
-interface RectLike {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  rotation?: number;
-}
-
-interface ScreenRect {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
 }
 
 interface SizeLike {
@@ -130,6 +130,14 @@ interface ServerWorkspaceApplyOptions {
   source: ServerResponseSource;
 }
 
+type TransformInteractionKind =
+  | "drag-node"
+  | "resize-node"
+  | "rotate-node"
+  | "drag-child"
+  | "resize-child"
+  | "rotate-child";
+
 type InteractionState =
   | {
       kind: "pan";
@@ -158,8 +166,10 @@ type InteractionState =
       kind: "resize-node";
       pointerId: number;
       nodeId: string;
-      start: Point;
+      handleId: ResizeHandleId;
       originRect: RectLike;
+      originGeometry: TransformGeometry;
+      minimumSize: { w: number; h: number };
       snapshot: WorkspaceDocument;
       didMutate: boolean;
     }
@@ -167,8 +177,8 @@ type InteractionState =
       kind: "rotate-node";
       pointerId: number;
       nodeId: string;
-      center: Point;
-      startAngle: number;
+      pivot: Point;
+      startPointerAngle: number;
       originRotation: number;
       snapshot: WorkspaceDocument;
       didMutate: boolean;
@@ -188,8 +198,10 @@ type InteractionState =
       pointerId: number;
       nodeId: string;
       childId: string;
+      handleId: ResizeHandleId;
       originChild: PhyCanvasObject;
-      originPointerScene: Point;
+      originGeometry: TransformGeometry;
+      minimumSize: { w: number; h: number };
       snapshot: WorkspaceDocument;
       didMutate: boolean;
     }
@@ -199,24 +211,24 @@ type InteractionState =
       nodeId: string;
       childId: string;
       originChild: PhyCanvasObject;
-      originPivot: Point;
-      startAngle: number;
+      pivotScene: Point;
+      startPointerAngle: number;
+      originRotation: number;
       snapshot: WorkspaceDocument;
       didMutate: boolean;
     };
 
 const WORLD_WIDTH = 5200;
 const WORLD_HEIGHT = 3600;
-const MIN_ZOOM = 0.35;
+const GRID_STEP = 24;
+const GRID_MAJOR_STEP = GRID_STEP * 4;
+const MIN_ZOOM = 0.2;
 const MAX_ZOOM = 2.6;
 const AUTOSAVE_DELAY = 900;
 const ANALYZE_DELAY = 1400;
 const MAX_HISTORY = 40;
 const DEFAULT_CAMERA: CameraState = { x: 120, y: 80, zoom: 1 };
 const DEFAULT_VIEWPORT_SIZE: SizeLike = { width: 240, height: 180 };
-const PHY_CANVAS_PADDING = 16;
-const PHY_CANVAS_HEADER_HEIGHT = 30;
-const PHY_CANVAS_HEADER_GAP = 12;
 
 const TOOLS: Array<{ id: ToolId; icon: UiIconName; label: string; hint: string }> = [
   { id: "select", icon: "cursor", label: "选择", hint: "拖拽对象或拖动画布" },
@@ -425,6 +437,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   const pointersRef = useRef<Map<number, Point>>(new Map());
   const analyzeTimerRef = useRef<number | null>(null);
   const viewportPersistTimerRef = useRef<number | null>(null);
+  const selectionHudTimerRef = useRef<number | null>(null);
   const changeVersionRef = useRef(0);
   const requestSeqRef = useRef(0);
   const lastAppliedRequestRef = useRef(0);
@@ -450,12 +463,27 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   const [selectedSuggestionId, setSelectedSuggestionId] = useState<string | null>(null);
   const [chatDraft, setChatDraft] = useState("");
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const [selectionHudVisible, setSelectionHudVisible] = useState(false);
+  const [activeTransform, setActiveTransform] = useState<TransformInteractionKind | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
   useEffect(() => {
     document.body.classList.add("wb-no-scroll");
     return () => {
       document.body.classList.remove("wb-no-scroll");
+    };
+  }, []);
+
+  useEffect(() => {
+    const compactQuery = window.matchMedia("(max-width: 820px)");
+    const applyCompactSidebarState = () => {
+      setSidebarCollapsed(compactQuery.matches);
+    };
+
+    applyCompactSidebarState();
+    compactQuery.addEventListener("change", applyCompactSidebarState);
+    return () => {
+      compactQuery.removeEventListener("change", applyCompactSidebarState);
     };
   }, []);
 
@@ -544,6 +572,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       if (viewportPersistTimerRef.current) {
         window.clearTimeout(viewportPersistTimerRef.current);
       }
+      if (selectionHudTimerRef.current) {
+        window.clearTimeout(selectionHudTimerRef.current);
+      }
     };
   }, []);
 
@@ -574,23 +605,26 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     pendingSuggestions.find((item) => item.id === selectedSuggestionId) ?? pendingSuggestions[0] ?? null;
 
   useEffect(() => {
+    if (!selectedObjectRef) {
+      if (selectionHudTimerRef.current) {
+        window.clearTimeout(selectionHudTimerRef.current);
+      }
+      setSelectionHudVisible(false);
+      setMoreMenuOpen(false);
+    }
+  }, [selectedObjectRef]);
+
+  useEffect(() => {
     function onKeyDown(event: KeyboardEvent) {
       const target = event.target as HTMLElement | null;
-      const isTypingTarget =
-        !!target &&
-        (target.tagName === "TEXTAREA" ||
-          target.tagName === "INPUT" ||
-          target.isContentEditable);
-
+      const isTypingTarget = isNativeTextInputTarget(target);
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
         event.preventDefault();
         void saveCurrentWorkspace(true);
         return;
       }
 
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "d") {
-        event.preventDefault();
-        duplicateSelectedNode();
+      if (isTypingTarget) {
         return;
       }
 
@@ -635,11 +669,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     return pendingSuggestions
       .map((suggestion) => {
         const targetRef = suggestion.target_object_refs[0];
-        const rect = targetRef ? getObjectWorldRect(workspace, targetRef) : null;
-        if (!rect) {
+        const geometry = targetRef ? getObjectTransformGeometry(workspace, targetRef) : null;
+        if (!geometry) {
           return null;
         }
-        const screenRect = worldRectToScreenRect(rect, camera);
+        const screenRect = worldRectToScreenRect(geometry.aabb, camera);
         return {
           id: suggestion.id,
           suggestion,
@@ -657,19 +691,23 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     }>;
   }, [camera, pendingSuggestions, selectedSuggestionId, workspace]);
 
-  const selectionWorldRect = useMemo(() => {
+  const selectionGeometry = useMemo(() => {
     if (!workspace || !selectedObjectRef) {
       return null;
     }
-    return getObjectWorldRect(workspace, selectedObjectRef);
+    return getObjectTransformGeometry(workspace, selectedObjectRef);
   }, [workspace, selectedObjectRef]);
 
-  const selectionScreenRect = useMemo(() => {
-    if (!selectionWorldRect) {
+  const selectionWorldRect = selectionGeometry?.aabb ?? null;
+
+  const selectionScreenGeometry = useMemo(() => {
+    if (!selectionGeometry) {
       return null;
     }
-    return worldRectToScreenRect(selectionWorldRect, camera);
-  }, [camera, selectionWorldRect]);
+    return projectTransformGeometry(selectionGeometry, camera);
+  }, [camera, selectionGeometry]);
+
+  const selectionScreenRect = selectionScreenGeometry?.aabb ?? null;
 
   function getViewportSize(): SizeLike {
     const rect = viewportRef.current?.getBoundingClientRect();
@@ -677,6 +715,17 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return DEFAULT_VIEWPORT_SIZE;
     }
     return { width: rect.width, height: rect.height };
+  }
+
+  function getCurrentOverlaySafeInsets(
+    viewportRect: DOMRect | null = viewportRef.current?.getBoundingClientRect() ?? null
+  ) {
+    return getOverlaySafeInsets(
+      viewportRect,
+      topbarRef.current?.getBoundingClientRect() ?? null,
+      dockRef.current?.getBoundingClientRect() ?? null,
+      sidebarRef.current?.getBoundingClientRect() ?? null
+    );
   }
 
   function setWorkspaceSnapshot(nextDocument: WorkspaceDocument) {
@@ -974,6 +1023,30 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     setHistoryFuture([]);
   }
 
+  function hideSelectionHud() {
+    if (selectionHudTimerRef.current) {
+      window.clearTimeout(selectionHudTimerRef.current);
+      selectionHudTimerRef.current = null;
+    }
+    setSelectionHudVisible(false);
+    setMoreMenuOpen(false);
+  }
+
+  function revealSelectionHud(duration = 1400) {
+    if (selectionHudTimerRef.current) {
+      window.clearTimeout(selectionHudTimerRef.current);
+      selectionHudTimerRef.current = null;
+    }
+    setSelectionHudVisible(true);
+    if (duration > 0) {
+      selectionHudTimerRef.current = window.setTimeout(() => {
+        setSelectionHudVisible(false);
+        setMoreMenuOpen(false);
+        selectionHudTimerRef.current = null;
+      }, duration);
+    }
+  }
+
   function updateSelection(selectedRefs: string[], persist = false) {
     commitWorkspace(
       (document) => ({
@@ -986,6 +1059,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       { persist, allowWhileLocked: true }
     );
     setMoreMenuOpen(false);
+    if (selectedRefs.length === 0) {
+      hideSelectionHud();
+    }
   }
 
   function updateActiveTool(tool: ToolId) {
@@ -999,6 +1075,27 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       }),
       { allowWhileLocked: true }
     );
+  }
+
+  function claimPointerForInteraction(event: ReactPointerEvent<HTMLElement | SVGElement>) {
+    event.preventDefault();
+    event.stopPropagation();
+    window.getSelection()?.removeAllRanges();
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Some synthetic or cancelled pointer streams cannot be captured.
+    }
+  }
+
+  function releaseInteractionPointer(event: ReactPointerEvent<HTMLElement | SVGElement>) {
+    try {
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    } catch {
+      // Pointer capture is best-effort; finish the interaction state regardless.
+    }
   }
 
   function insertNodeAt(worldPoint: Point, tool: Exclude<ToolId, "select">) {
@@ -1025,22 +1122,74 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     );
   }
 
-  function insertTemplate() {
-    commitWorkspace(
-      (document) => {
-        const rebasedTemplate = rebaseNodeStack(document, createForceAnalysisTemplate());
-        return {
-          ...document,
-          whiteboard_nodes: sortNodes([...document.whiteboard_nodes, ...rebasedTemplate]),
-          selection_state: {
-            ...document.selection_state,
-            selected_object_refs: [],
-            active_tool: "select"
-          }
-        };
-      },
-      { persist: true, pushHistory: true, analyze: true }
+  function insertBlankStartNode() {
+    const viewportRect = viewportRef.current?.getBoundingClientRect() ?? null;
+    const insets = getCurrentOverlaySafeInsets(viewportRect);
+    const usableWidth = Math.max(120, (viewportRect?.width ?? DEFAULT_VIEWPORT_SIZE.width) - insets.left - insets.right);
+    const usableHeight = Math.max(
+      120,
+      (viewportRect?.height ?? DEFAULT_VIEWPORT_SIZE.height) - insets.top - insets.bottom
     );
+    const screenPoint = {
+      x: insets.left + usableWidth / 2,
+      y: insets.top + usableHeight / 2
+    };
+    const worldPoint = viewportRect
+      ? screenToWorldPoint(
+          viewportRect.left + screenPoint.x,
+          viewportRect.top + screenPoint.y,
+          viewportRect,
+          cameraRef.current
+        )
+      : {
+          x: cameraRef.current.x + screenPoint.x / cameraRef.current.zoom,
+          y: cameraRef.current.y + screenPoint.y / cameraRef.current.zoom
+        };
+
+    insertNodeAt(worldPoint, "block");
+  }
+
+  function insertTemplate() {
+    const current = workspaceRef.current;
+    if (!current) {
+      return;
+    }
+
+    const rebasedTemplate = rebaseNodeStack(current, createForceAnalysisTemplate());
+    const currentBounds = current.whiteboard_nodes.length > 0 ? getDocumentBounds(current.whiteboard_nodes) : null;
+    const templateBounds = getDocumentBounds(rebasedTemplate);
+    const templateOffsetX =
+      currentBounds && currentBounds.w > 0
+        ? Math.max(0, currentBounds.x + currentBounds.w + 80 - templateBounds.x)
+        : 0;
+    const shiftedTemplate = templateOffsetX
+      ? rebasedTemplate.map((node) => ({
+          ...node,
+          rect: {
+            ...node.rect,
+            x: node.rect.x + templateOffsetX
+          }
+        }))
+      : rebasedTemplate;
+    const nextNodes = sortNodes([...current.whiteboard_nodes, ...shiftedTemplate]);
+    const viewportRect = viewportRef.current?.getBoundingClientRect() ?? null;
+    const nextCamera = viewportRect
+      ? fitCameraToNodes(nextNodes, viewportRect, getCurrentOverlaySafeInsets(viewportRect))
+      : cameraRef.current;
+
+    commitWorkspace(
+      (document) => ({
+        ...document,
+        whiteboard_nodes: nextNodes,
+        selection_state: {
+          ...document.selection_state,
+          selected_object_refs: [],
+          active_tool: "select"
+        }
+      }),
+      { persist: true, pushHistory: true, analyze: true, viewport: nextCamera }
+    );
+    setCameraState(nextCamera);
   }
 
   function removeSelectedObject() {
@@ -1107,8 +1256,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
+    const viewportRect = viewportRef.current.getBoundingClientRect();
     setCameraState(
-      focusCameraOnRect(selectionWorldRect, camera.zoom, viewportRef.current.getBoundingClientRect(), overlaySafeInsets)
+      focusCameraOnRect(selectionWorldRect, camera.zoom, viewportRect, getCurrentOverlaySafeInsets(viewportRect))
     );
   }
 
@@ -1123,23 +1273,8 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
-    const viewport = viewportRef.current.getBoundingClientRect();
-    const padding = 220;
-    const bounds = getDocumentBounds(nodes);
-    const nextZoom = clamp(
-      Math.min(
-        (viewport.width - padding) / Math.max(bounds.w, 320),
-        (viewport.height - padding) / Math.max(bounds.h, 240)
-      ),
-      MIN_ZOOM,
-      Math.min(1.25, MAX_ZOOM)
-    );
-
-    setCameraState({
-      x: bounds.x + bounds.w / 2 - viewport.width / nextZoom / 2,
-      y: bounds.y + bounds.h / 2 - viewport.height / nextZoom / 2,
-      zoom: nextZoom
-    });
+    const viewportRect = viewportRef.current.getBoundingClientRect();
+    setCameraState(fitCameraToNodes(nodes, viewportRect, getCurrentOverlaySafeInsets(viewportRect)));
   }
 
   function zoomAt(clientX: number, clientY: number, nextZoom: number) {
@@ -1172,6 +1307,10 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
+    if (interactionRef.current) {
+      return;
+    }
+
     if (event.button !== 0 && event.pointerType === "mouse") {
       return;
     }
@@ -1181,12 +1320,18 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
+    const target = event.target as HTMLElement;
+    if (isNativeTextInputTarget(target)) {
+      return;
+    }
+
+    event.preventDefault();
+
     if (activeTool !== "select") {
       if (!event.isPrimary || pointersRef.current.size > 0) {
         return;
       }
-      const target = event.target as HTMLElement;
-      if (target.closest(".wb-node, .wb-selection-frame, .wb-selection-menu, .wb-more-menu")) {
+      if (target.closest(".wb-node, .wb-selection-gizmo, .wb-selection-angle, .wb-selection-menu, .wb-more-menu")) {
         return;
       }
       const worldPoint = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
@@ -1194,7 +1339,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
-    event.currentTarget.setPointerCapture(event.pointerId);
+    try {
+      event.currentTarget.setPointerCapture(event.pointerId);
+    } catch {
+      // Continue even if the browser cannot capture this pointer stream.
+    }
     pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
     if (pointersRef.current.size >= 2) {
@@ -1230,6 +1379,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
+    event.preventDefault();
     pointersRef.current.set(event.pointerId, { x: event.clientX, y: event.clientY });
 
     if (interaction.kind === "pan" && interaction.pointerId === event.pointerId) {
@@ -1270,6 +1420,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   }
 
   function handleViewportPointerUp(event: ReactPointerEvent<HTMLDivElement>) {
+    event.preventDefault();
     pointersRef.current.delete(event.pointerId);
     const interaction = interactionRef.current;
 
@@ -1294,20 +1445,24 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     }
 
     interactionRef.current = null;
+    setActiveTransform(null);
+    releaseInteractionPointer(event);
   }
 
   function startNodeDrag(event: ReactPointerEvent<HTMLElement>, node: WhiteboardNode) {
-    if (activeTool !== "select" || node.locked) {
+    if (activeTool !== "select" || node.locked || interactionRef.current) {
       return;
     }
 
     const target = event.target as HTMLElement;
-    if (target.closest("input, textarea, select, [contenteditable='true']")) {
+    if (isNativeTextInputTarget(target)) {
+      event.stopPropagation();
       return;
     }
 
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    claimPointerForInteraction(event);
+    hideSelectionHud();
+    setActiveTransform("drag-node");
     updateSelection([makeNodeObjectRef(node.id)], false);
     interactionRef.current = {
       kind: "drag-node",
@@ -1320,43 +1475,57 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     };
   }
 
-  function startNodeResize(event: ReactPointerEvent<HTMLButtonElement>, node: WhiteboardNode) {
-    if (node.locked) {
+  function startNodeResize(
+    event: ReactPointerEvent<HTMLButtonElement>,
+    node: WhiteboardNode,
+    handleId: ResizeHandleId
+  ) {
+    if (node.locked || !workspaceRef.current || interactionRef.current) {
       return;
     }
 
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    const originGeometry = getObjectTransformGeometry(workspaceRef.current, makeNodeObjectRef(node.id));
+    if (!originGeometry) {
+      return;
+    }
+
+    claimPointerForInteraction(event);
+    hideSelectionHud();
+    setActiveTransform("resize-node");
     interactionRef.current = {
       kind: "resize-node",
       pointerId: event.pointerId,
       nodeId: node.id,
-      start: { x: event.clientX, y: event.clientY },
+      handleId,
       originRect: node.rect,
+      originGeometry,
+      minimumSize: minNodeSize(node.kind),
       snapshot: cloneDocument(workspaceRef.current!),
       didMutate: false
     };
   }
 
   function startNodeRotate(event: ReactPointerEvent<HTMLButtonElement>, node: WhiteboardNode) {
-    if (!viewportRef.current || node.locked) {
+    if (!viewportRef.current || node.locked || !workspaceRef.current || interactionRef.current) {
       return;
     }
 
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const center = {
-      x: node.rect.x + node.rect.w / 2,
-      y: node.rect.y + node.rect.h / 2
-    };
+    const originGeometry = getObjectTransformGeometry(workspaceRef.current, makeNodeObjectRef(node.id));
+    if (!originGeometry) {
+      return;
+    }
+
+    claimPointerForInteraction(event);
+    hideSelectionHud();
+    setActiveTransform("rotate-node");
     const viewport = viewportRef.current.getBoundingClientRect();
     const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
     interactionRef.current = {
       kind: "rotate-node",
       pointerId: event.pointerId,
       nodeId: node.id,
-      center,
-      startAngle: Math.atan2(pointerWorld.y - center.y, pointerWorld.x - center.x),
+      pivot: originGeometry.pivot,
+      startPointerAngle: getPointerAngleDegrees(pointerWorld, originGeometry.pivot),
       originRotation: node.rect.rotation ?? 0,
       snapshot: cloneDocument(workspaceRef.current!),
       didMutate: false
@@ -1364,17 +1533,18 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   }
 
   function startChildDrag(
-    event: ReactPointerEvent<SVGElement>,
+    event: ReactPointerEvent<HTMLElement | SVGElement>,
     node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
     child: PhyCanvasObject
   ) {
-    if (!viewportRef.current || activeTool !== "select" || node.locked) {
+    if (!viewportRef.current || activeTool !== "select" || node.locked || interactionRef.current) {
       return;
     }
 
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    handleChildSelect(node.id, child.id);
+    claimPointerForInteraction(event);
+    hideSelectionHud();
+    setActiveTransform("drag-child");
+    updateSelection([makeChildObjectRef(node.id, child.id)], false);
     const viewport = viewportRef.current.getBoundingClientRect();
     const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
     interactionRef.current = {
@@ -1389,37 +1559,54 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     };
   }
 
-  function startChildResize(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (!viewportRef.current || !selectedNode || selectedNode.kind !== "phy_canvas" || !selectedChild) {
+  function startChildResize(event: ReactPointerEvent<HTMLButtonElement>, handleId: ResizeHandleId) {
+    if (
+      !viewportRef.current ||
+      !selectedNode ||
+      selectedNode.kind !== "phy_canvas" ||
+      selectedNode.locked ||
+      !selectedChild ||
+      interactionRef.current
+    ) {
       return;
     }
 
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
-    const viewport = viewportRef.current.getBoundingClientRect();
-    const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+    const originGeometry = getPhyCanvasChildSceneGeometry(selectedChild);
+    claimPointerForInteraction(event);
+    hideSelectionHud();
+    setActiveTransform("resize-child");
     interactionRef.current = {
       kind: "resize-child",
       pointerId: event.pointerId,
       nodeId: selectedNode.id,
       childId: selectedChild.id,
+      handleId,
       originChild: selectedChild,
-      originPointerScene: worldPointToPhyCanvasScenePoint(selectedNode, pointerWorld),
+      originGeometry,
+      minimumSize: minChildSize(selectedChild.kind),
       snapshot: cloneDocument(workspaceRef.current!),
       didMutate: false
     };
   }
 
   function startChildRotate(event: ReactPointerEvent<HTMLButtonElement>) {
-    if (!viewportRef.current || !selectedNode || selectedNode.kind !== "phy_canvas" || !selectedChild) {
+    if (
+      !viewportRef.current ||
+      !selectedNode ||
+      selectedNode.kind !== "phy_canvas" ||
+      selectedNode.locked ||
+      !selectedChild ||
+      interactionRef.current
+    ) {
       return;
     }
 
-    event.stopPropagation();
-    event.currentTarget.setPointerCapture(event.pointerId);
+    claimPointerForInteraction(event);
+    hideSelectionHud();
+    setActiveTransform("rotate-child");
     const viewport = viewportRef.current.getBoundingClientRect();
     const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
-    const originPivot = { x: selectedChild.x, y: selectedChild.y };
+    const originGeometry = getPhyCanvasChildSceneGeometry(selectedChild);
     const pointerScene = worldPointToPhyCanvasScenePoint(selectedNode, pointerWorld);
     interactionRef.current = {
       kind: "rotate-child",
@@ -1427,8 +1614,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       nodeId: selectedNode.id,
       childId: selectedChild.id,
       originChild: selectedChild,
-      originPivot,
-      startAngle: Math.atan2(pointerScene.y - originPivot.y, pointerScene.x - originPivot.x),
+      pivotScene: originGeometry.pivot,
+      startPointerAngle: getPointerAngleDegrees(pointerScene, originGeometry.pivot),
+      originRotation: selectedChild.rotation ?? 0,
       snapshot: cloneDocument(workspaceRef.current!),
       didMutate: false
     };
@@ -1444,6 +1632,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       return;
     }
 
+    event.preventDefault();
     const viewport = viewportRef.current.getBoundingClientRect();
     if (interaction.kind === "drag-node") {
       const dx = (event.clientX - interaction.start.x) / cameraRef.current.zoom;
@@ -1462,12 +1651,20 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     }
 
     if (interaction.kind === "resize-node") {
-      const dx = (event.clientX - interaction.start.x) / cameraRef.current.zoom;
-      const dy = (event.clientY - interaction.start.y) / cameraRef.current.zoom;
+      const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
+      const resized = resizeTransformGeometry(
+        interaction.originGeometry,
+        interaction.handleId,
+        pointerWorld,
+        interaction.minimumSize,
+        event.shiftKey
+      );
       const nextRect = clampRect({
         ...interaction.originRect,
-        w: Math.max(180, interaction.originRect.w + dx),
-        h: Math.max(96, interaction.originRect.h + dy)
+        x: resized.center.x - resized.width / 2,
+        y: resized.center.y - resized.height / 2,
+        w: resized.width,
+        h: resized.height
       });
       interaction.didMutate = true;
       commitWorkspace(
@@ -1479,16 +1676,19 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
     if (interaction.kind === "rotate-node") {
       const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
-      const angle =
-        (Math.atan2(pointerWorld.y - interaction.center.y, pointerWorld.x - interaction.center.x) -
-          interaction.startAngle) *
-        (180 / Math.PI);
+      const deltaAngle = getAngleDeltaDegrees(
+        interaction.startPointerAngle,
+        getPointerAngleDegrees(pointerWorld, interaction.pivot)
+      );
+      const nextRotation = event.shiftKey
+        ? snapAngle(interaction.originRotation + deltaAngle, 15)
+        : interaction.originRotation + deltaAngle;
       interaction.didMutate = true;
       commitWorkspace(
         (document) =>
           updateNodeRect(document, interaction.nodeId, {
             ...getNodeRect(document, interaction.nodeId),
-            rotation: interaction.originRotation + angle
+            rotation: nextRotation
           }),
         { persist: true }
       );
@@ -1529,17 +1729,22 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     if (interaction.kind === "resize-child") {
       const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
       const pointerScene = worldPointToPhyCanvasScenePoint(node, pointerWorld);
+      const resized = resizeTransformGeometry(
+        interaction.originGeometry,
+        interaction.handleId,
+        pointerScene,
+        interaction.minimumSize,
+        event.shiftKey
+      );
       interaction.didMutate = true;
       commitWorkspace(
         (document) =>
-          updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
-            w: snapSceneValue(
-              Math.max(minChildSize(interaction.originChild.kind).w, interaction.originChild.w + (pointerScene.x - interaction.originPointerScene.x))
-            ),
-            h: snapSceneValue(
-              Math.max(minChildSize(interaction.originChild.kind).h, interaction.originChild.h + (pointerScene.y - interaction.originPointerScene.y))
-            )
-          }),
+          updatePhyCanvasChild(
+            document,
+            interaction.nodeId,
+            interaction.childId,
+            getResizedChildAttributes(interaction.originChild, interaction.originGeometry, resized)
+          ),
         { persist: true }
       );
       return;
@@ -1548,15 +1753,18 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     if (interaction.kind === "rotate-child") {
       const pointerWorld = screenToWorldPoint(event.clientX, event.clientY, viewport, cameraRef.current);
       const pointerScene = worldPointToPhyCanvasScenePoint(node, pointerWorld);
-      const deltaAngle =
-        (Math.atan2(pointerScene.y - interaction.originPivot.y, pointerScene.x - interaction.originPivot.x) -
-          interaction.startAngle) *
-        (180 / Math.PI);
+      const deltaAngle = getAngleDeltaDegrees(
+        interaction.startPointerAngle,
+        getPointerAngleDegrees(pointerScene, interaction.pivotScene)
+      );
+      const nextRotation = event.shiftKey
+        ? snapAngle(interaction.originRotation + deltaAngle, 15)
+        : interaction.originRotation + deltaAngle;
       interaction.didMutate = true;
       commitWorkspace(
         (document) =>
           updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
-            rotation: snapSceneValue((interaction.originChild.rotation ?? 0) + deltaAngle)
+            rotation: snapSceneValue(nextRotation)
           }),
         { persist: true }
       );
@@ -1568,6 +1776,9 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     if (!interaction || !("pointerId" in interaction) || interaction.pointerId !== event.pointerId) {
       return;
     }
+
+    event.preventDefault();
+    releaseInteractionPointer(event);
 
     if (
       (interaction.kind === "drag-node" ||
@@ -1582,7 +1793,20 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       scheduleBoardAnalysis();
     }
 
+    if (interaction.kind === "drag-node" || interaction.kind === "resize-node" || interaction.kind === "rotate-node") {
+      updateSelection([makeNodeObjectRef(interaction.nodeId)], false);
+    }
+
+    if (
+      interaction.kind === "drag-child" ||
+      interaction.kind === "resize-child" ||
+      interaction.kind === "rotate-child"
+    ) {
+      updateSelection([makeChildObjectRef(interaction.nodeId, interaction.childId)], false);
+    }
+
     interactionRef.current = null;
+    setActiveTransform(null);
   }
 
   async function handleImportSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1629,6 +1853,12 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           baseChangeVersion: analyzeSourceVersion,
           preserveTool: true
         });
+        const viewportRect = viewportRef.current?.getBoundingClientRect() ?? null;
+        if (viewportRect && analyzed.whiteboard_nodes.length > 0) {
+          setCameraState(
+            fitCameraToNodes(analyzed.whiteboard_nodes, viewportRect, getCurrentOverlaySafeInsets(viewportRect))
+          );
+        }
       });
       setAiState("idle");
       updateSaveState("idle");
@@ -1750,16 +1980,19 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
   function handleNodeSelect(nodeId: string) {
     updateSelection([makeNodeObjectRef(nodeId)], false);
+    revealSelectionHud();
   }
 
   function handleChildSelect(nodeId: string, childId: string) {
     updateSelection([makeChildObjectRef(nodeId, childId)], false);
+    revealSelectionHud();
   }
 
   function handleSuggestionMarkerClick(suggestion: BoardSuggestion) {
     const target = suggestion.target_object_refs[0];
     if (target) {
       updateSelection([target], false);
+      revealSelectionHud();
     }
     setSidebarCollapsed(false);
     setSelectedSuggestionId(suggestion.id);
@@ -1772,12 +2005,16 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
     }
 
     updateSelection([target], false);
+    revealSelectionHud();
     const rect = getObjectWorldRect(workspaceRef.current, target);
     if (!rect || !viewportRef.current) {
       return;
     }
 
-    setCameraState(focusCameraOnRect(rect, camera.zoom, viewportRef.current.getBoundingClientRect(), overlaySafeInsets));
+    const viewportRect = viewportRef.current.getBoundingClientRect();
+    setCameraState(
+      focusCameraOnRect(rect, camera.zoom, viewportRect, getCurrentOverlaySafeInsets(viewportRect))
+    );
   }
 
   function handleChatStubSubmit() {
@@ -1791,22 +2028,25 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   const worldStyle = {
     width: `${WORLD_WIDTH}px`,
     height: `${WORLD_HEIGHT}px`,
-    transform: `translate(${-camera.x}px, ${-camera.y}px) scale(${camera.zoom})`
+    transform: `scale(${camera.zoom}) translate(${-camera.x}px, ${-camera.y}px)`
   };
+  const gridStyle = {
+    "--wb-grid-size": `${GRID_STEP * camera.zoom}px`,
+    "--wb-grid-major-size": `${GRID_MAJOR_STEP * camera.zoom}px`,
+    "--wb-grid-x": `${-camera.x * camera.zoom}px`,
+    "--wb-grid-y": `${-camera.y * camera.zoom}px`
+  } as CSSProperties;
   const viewportBounds = viewportRef.current?.getBoundingClientRect() ?? null;
-  const overlaySafeInsets = getOverlaySafeInsets(
-    viewportBounds,
-    topbarRef.current?.getBoundingClientRect() ?? null,
-    dockRef.current?.getBoundingClientRect() ?? null,
-    sidebarRef.current?.getBoundingClientRect() ?? null
-  );
+  const overlaySafeInsets = getCurrentOverlaySafeInsets(viewportBounds);
+  const selectionMenuAnchor = selectionScreenGeometry ? getSelectionMenuAnchor(selectionScreenGeometry) : null;
+  const moreMenuAnchor = selectionScreenGeometry ? getMoreMenuAnchor(selectionScreenGeometry) : null;
   const selectionMenuPosition =
-    selectionScreenRect && viewportBounds
-      ? getSelectionMenuPosition(selectionScreenRect, viewportBounds, overlaySafeInsets)
+    selectionMenuAnchor && selectionScreenRect && viewportBounds
+      ? getSelectionMenuPosition(selectionMenuAnchor, selectionScreenRect, viewportBounds, overlaySafeInsets)
       : null;
   const moreMenuPosition =
-    selectionScreenRect && viewportBounds
-      ? getMoreMenuPosition(selectionScreenRect, viewportBounds, overlaySafeInsets)
+    moreMenuAnchor && selectionScreenRect && viewportBounds
+      ? getMoreMenuPosition(moreMenuAnchor, selectionScreenRect, viewportBounds, overlaySafeInsets)
       : null;
   const visibleSuggestionMarkers =
     viewportBounds === null
@@ -1817,7 +2057,38 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
         }));
   const remoteBusy = remoteMutationState !== "idle";
   const canTransformSelectedChild =
-    !!selectedChild && selectedChild.kind !== "label" && selectedNode?.kind === "phy_canvas";
+    !!selectedChild && selectedNode?.kind === "phy_canvas" && !selectedNode.locked && !!selectionGeometry?.canResize;
+  const isRotating = activeTransform === "rotate-node" || activeTransform === "rotate-child";
+  const isTransforming = activeTransform !== null;
+  const showTopLevelTransformHandles =
+    !!selectionScreenGeometry &&
+    selectedNodeIsTopLevel &&
+    !!selectedNode &&
+    !selectedNode.locked &&
+    selectionScreenGeometry.canResize;
+  const showChildTransformHandles =
+    !!selectionScreenGeometry &&
+    !selectedNodeIsTopLevel &&
+    canTransformSelectedChild &&
+    selectionScreenGeometry.canResize;
+  const showRotateHandle =
+    !!selectionScreenGeometry &&
+    ((selectedNodeIsTopLevel && !!selectedNode && !selectedNode.locked && selectionScreenGeometry.canRotate) ||
+      (!selectedNodeIsTopLevel && canTransformSelectedChild && selectionScreenGeometry.canRotate));
+  const showMoveHandle =
+    !!selectionScreenGeometry &&
+    ((selectedNodeIsTopLevel && !!selectedNode && !selectedNode.locked) ||
+      (!selectedNodeIsTopLevel && !!selectedChild && selectedNode?.kind === "phy_canvas" && !selectedNode.locked));
+  const moveHandlePosition =
+    selectionScreenGeometry && viewportBounds
+      ? getMoveHandlePosition(selectionScreenGeometry, viewportBounds, overlaySafeInsets)
+      : null;
+  const showSelectionMenu = !!selectionScreenGeometry && selectionHudVisible && !isTransforming;
+  const showSelectionAngle = !!selectionScreenGeometry && !!selectionGeometry && isRotating;
+  const selectionOutlinePoints = selectionScreenGeometry
+    ? selectionScreenGeometry.cornerOrder.map((point) => `${point.x},${point.y}`).join(" ")
+    : "";
+  const selectionAngleLabel = selectionGeometry ? formatAngleDegrees(selectionGeometry.rotation) : null;
 
   if (loading) {
     return (
@@ -2057,15 +2328,20 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
         onPointerMove={handleViewportPointerMove}
         onPointerUp={handleViewportPointerUp}
         onPointerCancel={handleViewportPointerUp}
+        onDragStart={(event) => event.preventDefault()}
         onWheel={(event: ReactWheelEvent<HTMLDivElement>) => {
           if (!viewportRef.current) {
             return;
           }
           if (event.ctrlKey || event.metaKey) {
+            return;
+          }
+          if (event.altKey) {
             event.preventDefault();
             zoomAt(event.clientX, event.clientY, camera.zoom - event.deltaY * 0.0025);
             return;
           }
+          event.preventDefault();
           setCameraState({
             x: cameraRef.current.x + event.deltaX / cameraRef.current.zoom,
             y: cameraRef.current.y + event.deltaY / cameraRef.current.zoom,
@@ -2073,7 +2349,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           });
         }}
       >
-        <div className="wb-grid" />
+        <div className="wb-grid" style={gridStyle} />
         <div className="wb-world" style={worldStyle}>
           {runtimeShapes.map((shape) => {
             const node = shape.node;
@@ -2098,12 +2374,15 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 onPointerDown={(event) => startNodeDrag(event, node)}
                 onPointerMove={handleNodeInteractionMove}
                 onPointerUp={finishNodeInteraction}
+                onPointerCancel={finishNodeInteraction}
                 onClick={() => handleNodeSelect(node.id)}
+                onDragStart={(event) => event.preventDefault()}
+                draggable={false}
               >
                 {node.kind === "source_image" ? (
                   <div className="wb-image-node">
                     {node.payload.preview_key ? (
-                      <img src={buildPreviewUrl(node.payload.preview_key)} alt={node.payload.alt} />
+                      <img src={buildPreviewUrl(node.payload.preview_key)} alt={node.payload.alt} draggable={false} />
                     ) : null}
                     <div className="wb-image-node__caption">
                       <span>{node.payload.caption ?? node.payload.alt}</span>
@@ -2113,29 +2392,22 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
                 {node.kind === "rich_block" ? (
                   <div className={`wb-rich-block wb-rich-block--${node.payload.block_role}`}>
-                    <div className="wb-rich-block__eyebrow">{shape.title}</div>
                     {isSelected ? (
                       <div className="wb-rich-block__editor">
-                        <input
-                          value={node.payload.title ?? ""}
-                          onFocus={() => handleRichBlockFocus(node.id)}
-                          onBlur={() => handleRichBlockBlur(node.id)}
-                          onChange={(event) => updateRichBlockField(node.id, "title", event.target.value)}
-                          placeholder="标题"
-                          aria-label="块标题"
-                        />
                         <textarea
                           value={node.payload.content}
+                          onPointerDown={(event) => event.stopPropagation()}
+                          onClick={(event) => event.stopPropagation()}
                           onFocus={() => handleRichBlockFocus(node.id)}
                           onBlur={() => handleRichBlockBlur(node.id)}
                           onChange={(event) => updateRichBlockField(node.id, "content", event.target.value)}
+                          placeholder="输入文字"
                           aria-label="块内容"
                         />
                       </div>
                     ) : (
                       <div className="wb-rich-block__preview">
-                        <strong>{node.payload.title ?? richBlockDefaultTitle(node)}</strong>
-                        <p>{node.payload.content}</p>
+                        <p className={node.payload.content ? "" : "is-empty"}>{node.payload.content}</p>
                       </div>
                     )}
                   </div>
@@ -2153,6 +2425,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                     >
                       {parsePhyCanvasObjects(node).map((item) => {
                         const childSelected = selectedObjectRef === item.objectRef;
+                        const rotationOrigin = getPhyCanvasChildRotationOrigin(item);
                         const commonProps = {
                           className: `wb-phy-shape wb-phy-shape--${item.kind} ${childSelected ? "is-selected" : ""}`,
                           onPointerDown: (event: ReactPointerEvent<SVGElement>) => {
@@ -2160,6 +2433,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                           },
                           onPointerMove: handleNodeInteractionMove,
                           onPointerUp: finishNodeInteraction,
+                          onPointerCancel: finishNodeInteraction,
                           onClick: (event: ReactMouseEvent<SVGElement>) => {
                             event.stopPropagation();
                             handleChildSelect(node.id, item.id);
@@ -2168,7 +2442,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
                         if (item.kind === "body") {
                           return (
-                            <g key={item.id} transform={`translate(${item.x} ${item.y}) rotate(${item.rotation})`} {...commonProps}>
+                            <g
+                              key={item.id}
+                              transform={`translate(${item.x} ${item.y}) rotate(${item.rotation} ${rotationOrigin.x} ${rotationOrigin.y})`}
+                              {...commonProps}
+                            >
                               <rect width={item.w} height={item.h} rx="16" />
                               <text x={item.w / 2} y={item.h / 2 + 5} textAnchor="middle">
                                 {item.label ?? "物体"}
@@ -2179,7 +2457,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
                         if (item.kind === "surface") {
                           return (
-                            <g key={item.id} transform={`translate(${item.x} ${item.y}) rotate(${item.rotation})`} {...commonProps}>
+                            <g
+                              key={item.id}
+                              transform={`translate(${item.x} ${item.y}) rotate(${item.rotation} ${rotationOrigin.x} ${rotationOrigin.y})`}
+                              {...commonProps}
+                            >
                               <rect width={item.w} height={item.h} rx="6" />
                               <text x={item.w / 2} y="-8" textAnchor="middle">
                                 {item.label ?? "接触面"}
@@ -2190,7 +2472,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
                         if (item.kind === "force") {
                           return (
-                            <g key={item.id} transform={`translate(${item.x} ${item.y}) rotate(${item.rotation})`} {...commonProps}>
+                            <g
+                              key={item.id}
+                              transform={`translate(${item.x} ${item.y}) rotate(${item.rotation} ${rotationOrigin.x} ${rotationOrigin.y})`}
+                              {...commonProps}
+                            >
                               <line x1="0" y1={item.h / 2} x2={item.w - 12} y2={item.h / 2} />
                               <path d={`M${item.w - 12} ${item.h / 2 - 6} L${item.w} ${item.h / 2} L${item.w - 12} ${item.h / 2 + 6}`} />
                               <text x={item.w / 2} y={-8} textAnchor="middle">
@@ -2227,7 +2513,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
         <div className="wb-overlay-layer">
           {workspace.whiteboard_nodes.length === 0 ? (
             <div className="wb-empty-state" onPointerDown={(event) => event.stopPropagation()}>
-              <button className="wb-empty-state__button" type="button" onClick={() => updateActiveTool("block")}>
+              <button className="wb-empty-state__button" type="button" onClick={insertBlankStartNode}>
                 <UiIcon name="block" />
                 <span>空白开始</span>
               </button>
@@ -2255,121 +2541,205 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
             </button>
           ))}
 
-          {selectionScreenRect ? (
+          {selectionScreenGeometry ? (
             <>
-              <div
-                className={`wb-selection-frame ${selectedNodeIsTopLevel ? "is-node" : "is-child"}`}
-                style={{
-                  left: `${selectionScreenRect.left}px`,
-                  top: `${selectionScreenRect.top}px`,
-                  width: `${selectionScreenRect.width}px`,
-                  height: `${selectionScreenRect.height}px`
-                }}
-              >
-                {selectedNodeIsTopLevel && selectedNode ? (
-                  <>
-                    <button
-                      className="wb-selection-handle wb-selection-handle--rotate"
-                      type="button"
-                      title="旋转"
-                      onPointerDown={(event) => startNodeRotate(event, selectedNode)}
-                      onPointerMove={handleNodeInteractionMove}
-                      onPointerUp={finishNodeInteraction}
-                    />
-                    <button
-                      className="wb-selection-handle wb-selection-handle--resize"
-                      type="button"
-                      title="缩放"
-                      onPointerDown={(event) => startNodeResize(event, selectedNode)}
-                      onPointerMove={handleNodeInteractionMove}
-                      onPointerUp={finishNodeInteraction}
-                    />
-                  </>
-                ) : canTransformSelectedChild ? (
-                  <>
-                    <button
-                      className="wb-selection-handle wb-selection-handle--rotate"
-                      type="button"
-                      title="旋转子元素"
-                      onPointerDown={startChildRotate}
-                      onPointerMove={handleNodeInteractionMove}
-                      onPointerUp={finishNodeInteraction}
-                    />
-                    <button
-                      className="wb-selection-handle wb-selection-handle--resize"
-                      type="button"
-                      title="缩放子元素"
-                      onPointerDown={startChildResize}
-                      onPointerMove={handleNodeInteractionMove}
-                      onPointerUp={finishNodeInteraction}
-                    />
-                  </>
+              <div className={`wb-selection-gizmo ${selectedNodeIsTopLevel ? "is-node" : "is-child"}`}>
+                <svg className="wb-selection-gizmo__svg" aria-hidden="true">
+                  <polygon className="wb-selection-gizmo__outline" points={selectionOutlinePoints} />
+                  {showSelectionAngle ? (
+                    <>
+                      <line
+                        className="wb-selection-gizmo__axis wb-selection-gizmo__axis--x"
+                        x1={selectionScreenGeometry.axisX[0].x}
+                        y1={selectionScreenGeometry.axisX[0].y}
+                        x2={selectionScreenGeometry.axisX[1].x}
+                        y2={selectionScreenGeometry.axisX[1].y}
+                      />
+                      <line
+                        className="wb-selection-gizmo__axis wb-selection-gizmo__axis--y"
+                        x1={selectionScreenGeometry.axisY[0].x}
+                        y1={selectionScreenGeometry.axisY[0].y}
+                        x2={selectionScreenGeometry.axisY[1].x}
+                        y2={selectionScreenGeometry.axisY[1].y}
+                      />
+                      {selectionScreenGeometry.rotationHandle ? (
+                        <line
+                          className="wb-selection-gizmo__arm"
+                          x1={selectionScreenGeometry.rightEdgeMidpoint.x}
+                          y1={selectionScreenGeometry.rightEdgeMidpoint.y}
+                          x2={selectionScreenGeometry.rotationHandle.x}
+                          y2={selectionScreenGeometry.rotationHandle.y}
+                        />
+                      ) : null}
+                      <circle
+                        className="wb-selection-gizmo__pivot"
+                        cx={selectionScreenGeometry.pivot.x}
+                        cy={selectionScreenGeometry.pivot.y}
+                        r="5"
+                      />
+                    </>
+                  ) : null}
+                </svg>
+
+                {showMoveHandle && selectedNode ? (
+                  <button
+                    className="wb-selection-handle wb-selection-handle--move"
+                    type="button"
+                    aria-label={selectedNodeIsTopLevel ? "移动所选节点" : "移动所选子元素"}
+                    title={selectedNodeIsTopLevel ? "移动" : "移动子元素"}
+                    style={{
+                      left: `${moveHandlePosition?.x ?? selectionScreenGeometry.corners.nw.x}px`,
+                      top: `${moveHandlePosition?.y ?? selectionScreenGeometry.corners.nw.y}px`
+                    }}
+                    onPointerDown={(event) => {
+                      if (selectedNodeIsTopLevel) {
+                        startNodeDrag(event, selectedNode);
+                      } else if (selectedNode.kind === "phy_canvas" && selectedChild) {
+                        startChildDrag(event, selectedNode, selectedChild);
+                      }
+                    }}
+                    onPointerMove={handleNodeInteractionMove}
+                    onPointerUp={finishNodeInteraction}
+                    onPointerCancel={finishNodeInteraction}
+                  />
                 ) : null}
+
+                {showRotateHandle && selectionScreenGeometry.rotationHandle ? (
+                  <button
+                    className="wb-selection-handle wb-selection-handle--rotate"
+                    type="button"
+                    title={selectedNodeIsTopLevel ? "旋转" : "旋转子元素"}
+                    style={{
+                      left: `${selectionScreenGeometry.rotationHandle.x}px`,
+                      top: `${selectionScreenGeometry.rotationHandle.y}px`
+                    }}
+                    onPointerDown={
+                      selectedNodeIsTopLevel && selectedNode
+                        ? (event) => startNodeRotate(event, selectedNode)
+                        : startChildRotate
+                    }
+                    onPointerMove={handleNodeInteractionMove}
+                    onPointerUp={finishNodeInteraction}
+                    onPointerCancel={finishNodeInteraction}
+                  />
+                ) : null}
+
+                {showTopLevelTransformHandles && selectedNode
+                  ? selectionScreenGeometry.resizeHandles.map((handle) => (
+                      <button
+                        key={handle.id}
+                        className={`wb-selection-handle wb-selection-handle--corner wb-selection-handle--corner-${handle.id}`}
+                        type="button"
+                        title="缩放"
+                        style={{
+                          left: `${handle.point.x}px`,
+                          top: `${handle.point.y}px`
+                        }}
+                        onPointerDown={(event) => startNodeResize(event, selectedNode, handle.id)}
+                        onPointerMove={handleNodeInteractionMove}
+                        onPointerUp={finishNodeInteraction}
+                        onPointerCancel={finishNodeInteraction}
+                      />
+                    ))
+                  : null}
+
+                {showChildTransformHandles
+                  ? selectionScreenGeometry.resizeHandles.map((handle) => (
+                      <button
+                        key={handle.id}
+                        className={`wb-selection-handle wb-selection-handle--corner wb-selection-handle--corner-${handle.id}`}
+                        type="button"
+                        title="缩放子元素"
+                        style={{
+                          left: `${handle.point.x}px`,
+                          top: `${handle.point.y}px`
+                        }}
+                        onPointerDown={(event) => startChildResize(event, handle.id)}
+                        onPointerMove={handleNodeInteractionMove}
+                        onPointerUp={finishNodeInteraction}
+                        onPointerCancel={finishNodeInteraction}
+                      />
+                    ))
+                  : null}
               </div>
 
-              <div
-                className={`wb-selection-menu ${selectionMenuPosition?.placement === "below" ? "is-below" : ""}`}
-                style={{
-                  left: `${selectionMenuPosition?.left ?? selectionScreenRect.left + selectionScreenRect.width / 2}px`,
-                  top: `${selectionMenuPosition?.top ?? Math.max(16, selectionScreenRect.top - 20)}px`
-                }}
-                onPointerDown={(event) => event.stopPropagation()}
-              >
-                {selectedNodeIsTopLevel ? (
-                  <>
-                    <button className="wb-icon-button" type="button" title="复制" onClick={duplicateSelectedNode}>
-                      <UiIcon name="duplicate" />
-                    </button>
-                    <button
-                      className="wb-icon-button"
-                      type="button"
-                      title="AI 检查"
-                      onClick={() => {
-                        setSidebarCollapsed(false);
-                        setSelectedSuggestionId(null);
-                        void runBoardAnalysis();
-                      }}
-                    >
-                      <UiIcon name="spark" />
-                    </button>
-                    <button className="wb-icon-button" type="button" title="删除" onClick={removeSelectedObject}>
-                      <UiIcon name="trash" />
-                    </button>
-                    <button
-                      className={`wb-icon-button ${moreMenuOpen ? "is-active" : ""}`}
-                      type="button"
-                      title="更多"
-                      onClick={() => setMoreMenuOpen((value) => !value)}
-                    >
-                      <UiIcon name="more" />
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button
-                      className="wb-icon-button"
-                      type="button"
-                      title="AI 检查"
-                      onClick={() => {
-                        setSidebarCollapsed(false);
-                        void runBoardAnalysis();
-                      }}
-                    >
-                      <UiIcon name="spark" />
-                    </button>
-                    <button className="wb-icon-button" type="button" title="删除子元素" onClick={removeSelectedObject}>
-                      <UiIcon name="trash" />
-                    </button>
-                  </>
-                )}
-              </div>
+              {showSelectionAngle && selectionScreenGeometry.rotationHandle && selectionAngleLabel ? (
+                <div
+                  className="wb-selection-angle"
+                  style={{
+                    left: `${selectionScreenGeometry.rotationHandle.x + 12}px`,
+                    top: `${selectionScreenGeometry.rotationHandle.y}px`
+                  }}
+                >
+                  {selectionAngleLabel}
+                </div>
+              ) : null}
+
+              {showSelectionMenu ? (
+                <div
+                  className={`wb-selection-menu ${selectionMenuPosition?.placement === "below" ? "is-below" : ""}`}
+                  style={{
+                    left: `${selectionMenuPosition?.left ?? selectionMenuAnchor?.x ?? selectionScreenGeometry.aabb.left + selectionScreenGeometry.aabb.width / 2}px`,
+                    top: `${selectionMenuPosition?.top ?? Math.max(16, selectionScreenGeometry.aabb.top - 20)}px`
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  {selectedNodeIsTopLevel ? (
+                    <>
+                      <button className="wb-icon-button" type="button" title="复制" onClick={duplicateSelectedNode}>
+                        <UiIcon name="duplicate" />
+                      </button>
+                      <button
+                        className="wb-icon-button"
+                        type="button"
+                        title="AI 检查"
+                        onClick={() => {
+                          setSidebarCollapsed(false);
+                          setSelectedSuggestionId(null);
+                          void runBoardAnalysis();
+                        }}
+                      >
+                        <UiIcon name="spark" />
+                      </button>
+                      <button className="wb-icon-button" type="button" title="删除" onClick={removeSelectedObject}>
+                        <UiIcon name="trash" />
+                      </button>
+                      <button
+                        className={`wb-icon-button ${moreMenuOpen ? "is-active" : ""}`}
+                        type="button"
+                        title="更多"
+                        onClick={() => setMoreMenuOpen((value) => !value)}
+                      >
+                        <UiIcon name="more" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        className="wb-icon-button"
+                        type="button"
+                        title="AI 检查"
+                        onClick={() => {
+                          setSidebarCollapsed(false);
+                          void runBoardAnalysis();
+                        }}
+                      >
+                        <UiIcon name="spark" />
+                      </button>
+                      <button className="wb-icon-button" type="button" title="删除子元素" onClick={removeSelectedObject}>
+                        <UiIcon name="trash" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              ) : null}
 
               {selectedNodeIsTopLevel && moreMenuOpen ? (
                 <div
                   className="wb-more-menu"
                   style={{
-                    left: `${moreMenuPosition?.left ?? selectionScreenRect.left + selectionScreenRect.width / 2}px`,
-                    top: `${moreMenuPosition?.top ?? Math.max(58, selectionScreenRect.top + 24)}px`
+                    left: `${moreMenuPosition?.left ?? moreMenuAnchor?.x ?? selectionScreenGeometry.aabb.left + selectionScreenGeometry.aabb.width / 2}px`,
+                    top: `${moreMenuPosition?.top ?? Math.max(58, selectionScreenGeometry.aabb.top + 24)}px`
                   }}
                   onPointerDown={(event) => event.stopPropagation()}
                 >
@@ -2715,40 +3085,13 @@ function rebaseNodeStack(document: WorkspaceDocument, nodes: WhiteboardNode[]): 
   }));
 }
 
-function getObjectWorldRect(document: WorkspaceDocument, objectRef: string): RectLike | null {
-  const { nodeId, childId } = parseObjectRef(objectRef);
-  const node = document.whiteboard_nodes.find((item) => item.id === nodeId);
-  if (!node) {
-    return null;
-  }
-  if (!childId) {
-    return getRotatedNodeBounds(node.rect);
-  }
-  if (node.kind !== "phy_canvas") {
-    return getRotatedNodeBounds(node.rect);
-  }
-
-  const child = parsePhyCanvasObjects(node).find((item) => item.id === childId);
-  if (!child) {
-    return getRotatedNodeBounds(node.rect);
-  }
-  return getPhyCanvasChildWorldBounds(node, child);
-}
-
-function worldRectToScreenRect(rect: RectLike, camera: CameraState) {
-  return {
-    left: (rect.x - camera.x) * camera.zoom,
-    top: (rect.y - camera.y) * camera.zoom,
-    width: rect.w * camera.zoom,
-    height: rect.h * camera.zoom
-  };
-}
-
 function clampCamera(camera: CameraState, viewportSize: SizeLike = DEFAULT_VIEWPORT_SIZE): CameraState {
   const zoom = clamp(camera.zoom, MIN_ZOOM, MAX_ZOOM);
+  const horizontalGutter = viewportSize.width / zoom;
+  const verticalGutter = viewportSize.height / zoom;
   return {
-    x: clamp(camera.x, 0, Math.max(0, WORLD_WIDTH - viewportSize.width / zoom)),
-    y: clamp(camera.y, 0, Math.max(0, WORLD_HEIGHT - viewportSize.height / zoom)),
+    x: clamp(camera.x, -horizontalGutter, Math.max(0, WORLD_WIDTH - viewportSize.width / zoom) + horizontalGutter),
+    y: clamp(camera.y, -verticalGutter, Math.max(0, WORLD_HEIGHT - viewportSize.height / zoom) + verticalGutter),
     zoom
   };
 }
@@ -2772,154 +3115,22 @@ function distanceBetween(first: Point, second: Point): number {
   return Math.hypot(first.x - second.x, first.y - second.y);
 }
 
-function getDocumentBounds(nodes: WhiteboardNode[]) {
-  const bounds = nodes.map((node) => getRotatedNodeBounds(node.rect));
-  const minX = Math.min(...bounds.map((node) => node.x));
-  const minY = Math.min(...bounds.map((node) => node.y));
-  const maxX = Math.max(...bounds.map((node) => node.x + node.w));
-  const maxY = Math.max(...bounds.map((node) => node.y + node.h));
-  return {
-    x: minX,
-    y: minY,
-    w: maxX - minX,
-    h: maxY - minY
-  };
-}
-
-function getRotatedNodeBounds(rect: RectLike): RectLike {
-  return pointsToRect(getRotatedRectPoints(rect, rect.rotation ?? 0, getRectCenter(rect)));
-}
-
-function getPhyCanvasChildWorldBounds(
-  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
-  child: PhyCanvasObject
-): RectLike {
-  const localRect = getPhyCanvasChildLocalRect(node, child);
-  const localPoints = getRotatedRectPoints(localRect, child.rotation ?? 0, {
-    x: localRect.x,
-    y: localRect.y
-  });
-  return pointsToRect(localPoints.map((point) => phyCanvasLocalPointToWorld(node, point)));
-}
-
-function getPhyCanvasChildLocalRect(
-  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
-  child: PhyCanvasObject
-): RectLike {
-  const frame = getPhyCanvasFrame(node);
-  return {
-    x: frame.inner.x + child.x * frame.scaleX,
-    y: frame.inner.y + child.y * frame.scaleY,
-    w: Math.max(20, child.w * frame.scaleX),
-    h: Math.max(18, child.h * frame.scaleY),
-    rotation: child.rotation
-  };
-}
-
-function getPhyCanvasFrame(node: Extract<WhiteboardNode, { kind: "phy_canvas" }>) {
-  const drawableWidth = Math.max(1, node.rect.w - PHY_CANVAS_PADDING * 2);
-  const drawableHeight = Math.max(
-    1,
-    node.rect.h - PHY_CANVAS_PADDING * 2 - PHY_CANVAS_HEADER_HEIGHT - PHY_CANVAS_HEADER_GAP
-  );
-  return {
-    inner: {
-      x: PHY_CANVAS_PADDING,
-      y: PHY_CANVAS_PADDING + PHY_CANVAS_HEADER_HEIGHT + PHY_CANVAS_HEADER_GAP,
-      w: drawableWidth,
-      h: drawableHeight
-    },
-    scaleX: drawableWidth / Math.max(node.payload.bounds.width, 1),
-    scaleY: drawableHeight / Math.max(node.payload.bounds.height, 1)
-  };
-}
-
-function worldPointToPhyCanvasScenePoint(
-  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
-  worldPoint: Point
-): Point {
-  const frame = getPhyCanvasFrame(node);
-  const localPoint = worldPointToPhyCanvasLocalPoint(node, worldPoint);
-  return {
-    x: (localPoint.x - frame.inner.x) / frame.scaleX,
-    y: (localPoint.y - frame.inner.y) / frame.scaleY
-  };
-}
-
-function worldPointToPhyCanvasLocalPoint(
-  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
-  worldPoint: Point
-): Point {
-  const unrotatedWorld = rotatePoint(worldPoint, -(node.rect.rotation ?? 0), getRectCenter(node.rect));
-  return {
-    x: unrotatedWorld.x - node.rect.x,
-    y: unrotatedWorld.y - node.rect.y
-  };
-}
-
-function phyCanvasLocalPointToWorld(
-  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
-  localPoint: Point
-): Point {
-  return rotatePoint(
-    {
-      x: node.rect.x + localPoint.x,
-      y: node.rect.y + localPoint.y
-    },
-    node.rect.rotation ?? 0,
-    getRectCenter(node.rect)
-  );
-}
-
-function getRectCenter(rect: RectLike): Point {
-  return {
-    x: rect.x + rect.w / 2,
-    y: rect.y + rect.h / 2
-  };
-}
-
-function getRectPoints(rect: RectLike): Point[] {
-  return [
-    { x: rect.x, y: rect.y },
-    { x: rect.x + rect.w, y: rect.y },
-    { x: rect.x + rect.w, y: rect.y + rect.h },
-    { x: rect.x, y: rect.y + rect.h }
-  ];
-}
-
-function getRotatedRectPoints(rect: RectLike, angle: number, origin: Point): Point[] {
-  return getRectPoints(rect).map((point) => rotatePoint(point, angle, origin));
-}
-
-function rotatePoint(point: Point, angle: number, origin: Point): Point {
-  if (!angle) {
-    return point;
-  }
-
-  const radians = (angle * Math.PI) / 180;
-  const dx = point.x - origin.x;
-  const dy = point.y - origin.y;
-  return {
-    x: origin.x + dx * Math.cos(radians) - dy * Math.sin(radians),
-    y: origin.y + dx * Math.sin(radians) + dy * Math.cos(radians)
-  };
-}
-
-function pointsToRect(points: Point[]): RectLike {
-  const minX = Math.min(...points.map((point) => point.x));
-  const minY = Math.min(...points.map((point) => point.y));
-  const maxX = Math.max(...points.map((point) => point.x));
-  const maxY = Math.max(...points.map((point) => point.y));
-  return {
-    x: minX,
-    y: minY,
-    w: maxX - minX,
-    h: maxY - minY
-  };
-}
-
 function snapSceneValue(value: number) {
   return Math.round(value * 10) / 10;
+}
+
+function minNodeSize(kind: WhiteboardNode["kind"]) {
+  switch (kind) {
+    case "source_image":
+      return { w: 220, h: 140 };
+    case "phy_canvas":
+      return { w: 280, h: 180 };
+    case "ai_annotation":
+      return { w: 180, h: 120 };
+    case "rich_block":
+    default:
+      return { w: 140, h: 72 };
+  }
 }
 
 function minChildSize(kind: string) {
@@ -2948,13 +3159,36 @@ function focusCameraOnRect(
 ) {
   const usableWidth = Math.max(120, viewportRect.width - insets.left - insets.right);
   const usableHeight = Math.max(120, viewportRect.height - insets.top - insets.bottom);
+  const screenCenterX = insets.left + usableWidth / 2;
+  const screenCenterY = insets.top + usableHeight / 2;
   const centerX = rect.x + rect.w / 2;
   const centerY = rect.y + rect.h / 2;
   return {
-    x: centerX - usableWidth / zoom / 2 - (insets.left - insets.right) / zoom / 2,
-    y: centerY - usableHeight / zoom / 2 - (insets.top - insets.bottom) / zoom / 2,
+    x: centerX - screenCenterX / zoom,
+    y: centerY - screenCenterY / zoom,
     zoom
   };
+}
+
+function fitCameraToNodes(
+  nodes: WhiteboardNode[],
+  viewportRect: DOMRect,
+  insets: EdgeInsets = { top: 0, right: 0, bottom: 0, left: 0 }
+) {
+  const bounds = getDocumentBounds(nodes);
+  const padding = 96;
+  const usableWidth = Math.max(160, viewportRect.width - insets.left - insets.right - padding);
+  const usableHeight = Math.max(160, viewportRect.height - insets.top - insets.bottom - padding);
+  const nextZoom = clamp(
+    Math.min(
+      usableWidth / Math.max(bounds.w, 320),
+      usableHeight / Math.max(bounds.h, 240)
+    ),
+    MIN_ZOOM,
+    Math.min(1.25, MAX_ZOOM)
+  );
+
+  return focusCameraOnRect(bounds, nextZoom, viewportRect, insets);
 }
 
 function getOverlaySafeInsets(
@@ -2997,35 +3231,118 @@ function clampMarkerPosition(left: number, top: number, viewportRect: DOMRect, i
   };
 }
 
-function getSelectionMenuPosition(rect: ScreenRect, viewportRect: DOMRect, insets: EdgeInsets) {
+function isNativeTextInputTarget(target: EventTarget | null) {
+  return target instanceof HTMLElement && !!target.closest("input, textarea, select, [contenteditable='true']");
+}
+
+function getSelectionMenuPosition(anchor: Point, rect: ScreenRect, viewportRect: DOMRect, insets: EdgeInsets) {
   const menuWidth = 220;
   const menuHeight = 54;
   const centerX = clamp(
-    rect.left + rect.width / 2,
+    anchor.x,
     insets.left + menuWidth / 2,
     viewportRect.width - insets.right - menuWidth / 2
   );
-  const placeBelow = rect.top - insets.top < menuHeight + 12;
+  const placeBelow = anchor.y - insets.top < menuHeight + 18;
   return {
     left: centerX,
     top: placeBelow
       ? Math.min(viewportRect.height - insets.bottom - menuHeight, rect.top + rect.height + 14)
-      : Math.max(insets.top + menuHeight, rect.top - 18),
+      : Math.max(insets.top + menuHeight, Math.min(anchor.y - 18, rect.top - 18)),
     placement: placeBelow ? ("below" as const) : ("above" as const)
   };
 }
 
-function getMoreMenuPosition(rect: ScreenRect, viewportRect: DOMRect, insets: EdgeInsets) {
+function getMoreMenuPosition(anchor: Point, rect: ScreenRect, viewportRect: DOMRect, insets: EdgeInsets) {
   const menuWidth = 182;
   const menuHeight = 180;
   return {
     left: clamp(
-      rect.left + rect.width / 2,
+      anchor.x,
       insets.left + menuWidth / 2,
       viewportRect.width - insets.right - menuWidth / 2
     ),
-    top: clamp(rect.top + rect.height + 22, insets.top + 48, viewportRect.height - insets.bottom - menuHeight)
+    top: clamp(
+      Math.max(anchor.y + 18, rect.top + rect.height + 22),
+      insets.top + 48,
+      viewportRect.height - insets.bottom - menuHeight
+    )
   };
+}
+
+function getMoveHandlePosition(
+  geometry: ScreenTransformGeometry,
+  viewportRect: DOMRect,
+  insets: EdgeInsets
+) {
+  const offset = 24;
+  const handleRadius = 16;
+  const outward = {
+    x: geometry.corners.nw.x - geometry.center.x,
+    y: geometry.corners.nw.y - geometry.center.y
+  };
+  const length = Math.hypot(outward.x, outward.y) || 1;
+  const x = geometry.corners.nw.x + (outward.x / length) * offset;
+  const y = geometry.corners.nw.y + (outward.y / length) * offset;
+
+  return {
+    x: clamp(x, insets.left + handleRadius, viewportRect.width - insets.right - handleRadius),
+    y: clamp(y, insets.top + handleRadius, viewportRect.height - insets.bottom - handleRadius)
+  };
+}
+
+function getResizedChildAttributes(
+  child: PhyCanvasObject,
+  geometry: TransformGeometry,
+  resized: { center: Point; width: number; height: number }
+) {
+  if (child.kind === "force") {
+    const pivot = {
+      x: resized.center.x - geometry.axisXUnit.x * (resized.width / 2),
+      y: resized.center.y - geometry.axisXUnit.y * (resized.width / 2)
+    };
+    return {
+      x: snapSceneValue(pivot.x),
+      y: snapSceneValue(pivot.y - resized.height / 2),
+      w: snapSceneValue(resized.width),
+      h: snapSceneValue(resized.height)
+    };
+  }
+
+  return {
+    x: snapSceneValue(resized.center.x - resized.width / 2),
+    y: snapSceneValue(resized.center.y - resized.height / 2),
+    w: snapSceneValue(resized.width),
+    h: snapSceneValue(resized.height)
+  };
+}
+
+function getPointerAngleDegrees(pointer: Point, pivot: Point) {
+  return (Math.atan2(pointer.y - pivot.y, pointer.x - pivot.x) * 180) / Math.PI;
+}
+
+function getAngleDeltaDegrees(startAngle: number, currentAngle: number) {
+  return normalizeAngleDegrees(currentAngle - startAngle);
+}
+
+function normalizeAngleDegrees(angle: number) {
+  let normalized = angle % 360;
+  if (normalized > 180) {
+    normalized -= 360;
+  }
+  if (normalized <= -180) {
+    normalized += 360;
+  }
+  return normalized;
+}
+
+function snapAngle(angle: number, step: number) {
+  return Math.round(angle / step) * step;
+}
+
+function formatAngleDegrees(angle: number) {
+  const rounded = Math.round(normalizeAngleDegrees(angle));
+  return `${Object.is(rounded, -0) ? 0 : rounded}°`;
 }
 
 function richBlockDefaultTitle(node: Extract<WhiteboardNode, { kind: "rich_block" }>) {

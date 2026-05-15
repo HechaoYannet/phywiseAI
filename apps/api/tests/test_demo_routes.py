@@ -141,6 +141,29 @@ def test_workspace_source_analysis_and_suggestion_flow(client: TestClient) -> No
     assert any(item["id"] == pending["id"] and item["status"] == "rejected" for item in rejected["suggestions"])
 
 
+def test_text_source_analysis_skips_duplicate_summary_node(client: TestClient) -> None:
+    workspace_response = client.post("/api/workspaces", json={"title": "文本导入去重"})
+    workspace_id = workspace_response.json()["id"]
+    problem_text = "An object of mass m is at rest on a rough incline at angle theta."
+
+    attach_response = client.post(
+        f"/api/workspaces/{workspace_id}/sources",
+        data={
+            "text_content": problem_text,
+            "filename": "incline-problem.txt",
+        },
+    )
+    analyzed_response = client.post(f"/api/workspaces/{workspace_id}/analyze-source", json={})
+    analyzed = analyzed_response.json()
+    semantic_roles = [node["semantic_role"] for node in analyzed["whiteboard_nodes"]]
+
+    assert attach_response.status_code == 200
+    assert analyzed_response.status_code == 200
+    assert semantic_roles.count("problem-source") == 1
+    assert "source-summary" not in semantic_roles
+    assert analyzed["suggestions"]
+
+
 def test_upload_image_asset_returns_previewable_record(client: TestClient) -> None:
     image = Image.new("RGB", (32, 24), color=(255, 255, 255))
     buffer = BytesIO()

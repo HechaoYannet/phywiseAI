@@ -27,13 +27,18 @@
 ## 首发节点集合
 
 - `source_image`
-- `free_text`
-- `formula_block`
-- `physics_body`
-- `surface_line`
-- `force_arrow`
-- `condition_card`
+- `rich_block`
+- `phy_canvas`
 - `ai_annotation`
+
+当前 Web 端不再把力、物块、斜面、公式和条件分别持久化成顶层白板节点。顶层节点保持粗粒度：
+
+- `source_image` 承载导入图片/PDF 页预览及来源资源引用。
+- `rich_block` 承载题干、条件、推导、公式等 Markdown + math 文本块。
+- `phy_canvas` 承载受力分析场景，内部对象通过稳定 XML 与 `BoardObjectRef` 子引用寻址。
+- `ai_annotation` 承载 AI 检查、提示和下一步建议的可见卡片。
+
+受力图内部对象如 body、surface、force、label 属于 `phy_canvas` 子对象，不作为 `whiteboard_nodes` 的顶层 kind。AI 对这些对象的建议必须通过 `BoardSuggestion.target_object_refs` 与 `BoardPatch.object_mutations` 指向子对象，仍然由学生接受或拒绝后才写回。
 
 ## 统一语义字段
 
