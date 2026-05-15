@@ -22,6 +22,7 @@ import {
   rejectWorkspaceSuggestion,
   saveWorkspace
 } from "../lib/api";
+import { MarkdownMath } from "./markdown-math";
 import {
   documentToRuntimeShapes,
   findPhyCanvasChild,
@@ -2266,7 +2267,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                             {suggestionTargetLabel(workspace, suggestion)}
                           </span>
                         </div>
-                        <p>{suggestion.reason}</p>
+                        <MarkdownMath content={suggestion.reason} className="wb-suggestion-card__reason" />
                       </button>
                       <div className="wb-suggestion-card__actions">
                         <button className="wb-mini-button" type="button" disabled={remoteBusy} onClick={() => void handleAcceptSuggestion(suggestion.id)}>
@@ -2406,9 +2407,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                         />
                       </div>
                     ) : (
-                      <div className="wb-rich-block__preview">
-                        <p className={node.payload.content ? "" : "is-empty"}>{node.payload.content}</p>
-                      </div>
+                      <MarkdownMath content={node.payload.content} className="wb-rich-block__preview" />
                     )}
                   </div>
                 ) : null}
@@ -2502,7 +2501,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                       <UiIcon name="spark" />
                       <span>{node.payload.title}</span>
                     </div>
-                    <p>{node.payload.text}</p>
+                    <MarkdownMath content={node.payload.text} className="wb-ai-card__body" />
                   </div>
                 ) : null}
               </div>

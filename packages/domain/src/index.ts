@@ -235,7 +235,7 @@ export function createDemoWorkspace(): WorkspaceDocument {
         rect: { x: 860, y: 244, w: 320, h: 150 },
         payload: {
           title: "推导",
-          content: "沿斜面方向：`\\\\sum F_{\\\\parallel}=0`",
+          content: "沿斜面方向：$\\sum F_{\\parallel}=0$",
           content_format: "markdown_math",
           block_role: "derivation",
           status: "draft"

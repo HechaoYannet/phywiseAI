@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import { buildPreviewUrl, createWorkspace, getProblem } from "../lib/api";
+import { MarkdownMath } from "./markdown-math";
 
 interface ProblemConfirmationProps {
   problemId: string;
@@ -123,6 +124,7 @@ export function ProblemConfirmation({ problemId }: ProblemConfirmationProps) {
                 setProblem((current) => (current ? { ...current, stem: event.target.value } : current))
               }
             />
+            <MarkdownMath content={problem.stem} className="markdown-preview-panel" />
           </label>
 
           <div className="confirm-grid">
@@ -137,6 +139,10 @@ export function ProblemConfirmation({ problemId }: ProblemConfirmationProps) {
                       value={item.prompt}
                       onChange={(event) => updateSubquestion(index, event.target.value)}
                     />
+                    <MarkdownMath
+                      content={item.prompt}
+                      className="markdown-preview-panel markdown-preview-panel--compact"
+                    />
                   </label>
                 ))}
               </div>
@@ -149,6 +155,10 @@ export function ProblemConfirmation({ problemId }: ProblemConfirmationProps) {
                   <label className="stacked-field" key={item.id}>
                     <span>{item.label}</span>
                     <input value={item.value} onChange={(event) => updateCondition(index, event.target.value)} />
+                    <MarkdownMath
+                      content={item.value}
+                      className="markdown-preview-panel markdown-preview-panel--compact"
+                    />
                   </label>
                 ))}
               </div>

@@ -120,7 +120,7 @@ export function createForceAnalysisTemplate(): WhiteboardNode[] {
       width: 320,
       height: 160,
       title: "推导",
-      content: "沿斜面方向：`\\\\sum F_{\\\\parallel}=0`",
+      content: "沿斜面方向：$\\sum F_{\\parallel}=0$",
       block_role: "derivation",
       status: "draft",
       semanticRole: "derivation"

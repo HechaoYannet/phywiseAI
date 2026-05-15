@@ -7,6 +7,8 @@ import {
   createDemoWorkspace
 } from "@phywise/domain";
 
+import { MarkdownMath } from "../../../components/markdown-math";
+
 const workspace = createDemoWorkspace();
 const parseResult = createDemoProblemParseResult();
 const tutorTurn = createDemoTutorTurn();
@@ -51,7 +53,7 @@ export default function DemoWorkspacePage() {
             <h2>题目解析</h2>
             <span className="status-tag">confidence {parseResult.confidence}</span>
           </div>
-          <p className="stem">{parseResult.stem}</p>
+          <MarkdownMath content={parseResult.stem} className="stem" />
           <div className="chip-row">
             {parseResult.knowledge_links.map((item) => (
               <span key={item.id} className="chip">
@@ -66,14 +68,14 @@ export default function DemoWorkspacePage() {
             <h2>Tutor 回合</h2>
             <span className="status-tag">{tutorTurn.mode}</span>
           </div>
-          <p>{tutorTurn.prompt}</p>
+          <MarkdownMath content={tutorTurn.prompt} />
           <div className="detail-block">
             <strong>Hint</strong>
-            <p>{tutorTurn.hint}</p>
+            <MarkdownMath content={tutorTurn.hint ?? ""} />
           </div>
           <div className="detail-block">
             <strong>Check</strong>
-            <p>{tutorTurn.check}</p>
+            <MarkdownMath content={tutorTurn.check ?? ""} />
           </div>
         </article>
 
@@ -87,6 +89,9 @@ export default function DemoWorkspacePage() {
               <div key={node.id} className={`board-node kind-${node.kind}`}>
                 <span className="node-kind">{node.kind}</span>
                 <strong>{getNodeTitle(node)}</strong>
+                {node.kind === "rich_block" ? (
+                  <MarkdownMath content={node.payload.content} className="board-node__content" />
+                ) : null}
               </div>
             ))}
           </div>
@@ -99,7 +104,9 @@ export default function DemoWorkspacePage() {
           </div>
           <ul className="compact-list">
             {workspace.suggestions.map((suggestion) => (
-              <li key={suggestion.id}>{suggestion.reason}</li>
+              <li key={suggestion.id}>
+                <MarkdownMath content={suggestion.reason} />
+              </li>
             ))}
           </ul>
         </article>
@@ -113,7 +120,9 @@ export default function DemoWorkspacePage() {
           </div>
           <ul className="compact-list">
             {simulationScene.equations.map((equation) => (
-              <li key={equation}>{equation}</li>
+              <li key={equation}>
+                <MarkdownMath content={`$${equation}$`} />
+              </li>
             ))}
           </ul>
           <div className="chip-row">
@@ -131,8 +140,8 @@ export default function DemoWorkspacePage() {
         <div className="subquestion-list">
           {parseResult.subquestions.map((question) => (
             <article key={question.id} className="subquestion-card">
-              <strong>{question.prompt}</strong>
-              <span>{question.expected_output}</span>
+              <MarkdownMath content={question.prompt} className="subquestion-card__prompt" />
+              <MarkdownMath content={question.expected_output} className="subquestion-card__expected" />
             </article>
           ))}
         </div>

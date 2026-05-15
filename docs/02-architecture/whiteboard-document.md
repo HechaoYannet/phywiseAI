@@ -34,7 +34,7 @@
 当前 Web 端不再把力、物块、斜面、公式和条件分别持久化成顶层白板节点。顶层节点保持粗粒度：
 
 - `source_image` 承载导入图片/PDF 页预览及来源资源引用。
-- `rich_block` 承载题干、条件、推导、公式等 Markdown + math 文本块。
+- `rich_block` 承载题干、条件、推导、公式等 Markdown + math 文本块。当前 Web 端用 Chromium 兼容的 Markdown + KaTeX 渲染链路展示这些内容，协议中只保存原始 `content` 与 `content_format`，不持久化 renderer 私有结构。
 - `phy_canvas` 承载受力分析场景，内部对象通过稳定 XML 与 `BoardObjectRef` 子引用寻址。
 - `ai_annotation` 承载 AI 检查、提示和下一步建议的可见卡片。
 
@@ -57,5 +57,6 @@
 
 - `WorkspaceDocument -> runtime shapes`
 - `runtime user edits -> WorkspaceDocument patches`
+- `rich_block.content_format = markdown_math` 的显示层渲染，不改变文档协议本身。
 
 这样可以保证未来切换到 `tldraw` 或其他 renderer 时，不影响服务端保存、回放和 AI 分析协议。
