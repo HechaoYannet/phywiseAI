@@ -40,6 +40,12 @@
 
 受力图内部对象如 body、surface、force、label 属于 `phy_canvas` 子对象，不作为 `whiteboard_nodes` 的顶层 kind。AI 对这些对象的建议必须通过 `BoardSuggestion.target_object_refs` 与 `BoardPatch.object_mutations` 指向子对象，仍然由学生接受或拒绝后才写回。
 
+## PhyCanvas 几何约束
+
+`phy_canvas.payload.bounds` 定义内部 XML scene 的唯一坐标系。Web renderer 必须按等比 `meet` 方式把 scene 映射进节点内容区，指针坐标、选择框、旋转轴和 SVG `viewBox` 必须共享同一套映射，避免 X/Y 非等比缩放导致内部元素旋转或缩放失真。
+
+子对象的 `x`、`y`、`w`、`h`、`rotation` 写回 XML 前必须约束在 `bounds` 内。拖拽和缩放应以旋转后的 scene AABB 为准做 clamp；当缩放结果无法放入 bounds 时，应先缩小到可容纳范围，再写回 XML。SVG 层需要裁剪 scene 外内容，防止异常 XML 或交互中间态溢出到 PhyCanvas 节点外。
+
 ## 统一语义字段
 
 每个白板节点都应携带以下业务字段，而不是依赖 renderer 内部结构：

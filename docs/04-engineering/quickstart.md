@@ -41,6 +41,23 @@ cp apps/api/.env.example apps/api/.env
 - 本地文件存储，默认 `storage/`
 - 同步解析，默认 `PHYWISE_PARSE_EXECUTION_MODE=inline`
 
+## 一键快速启动
+
+macOS:
+
+```bash
+chmod +x scripts/start-dev.sh
+./scripts/start-dev.sh
+```
+
+Windows PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/start-dev.ps1
+```
+
+脚本会复用已有 `.env` 与 `phywise-dev` Conda 环境；缺失时会按默认模板创建，并同时启动 Web 与 API。
+
 ## 验证当前实现
 
 ```bash

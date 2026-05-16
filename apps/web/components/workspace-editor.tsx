@@ -566,6 +566,44 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   }, [workspace, selectedSuggestionId]);
 
   useEffect(() => {
+    let resizeTimer: number | null = null;
+
+    function reframeAfterResize() {
+      const current = workspaceRef.current;
+      const viewportRect = viewportRef.current?.getBoundingClientRect() ?? null;
+      if (!current || !viewportRect) {
+        return;
+      }
+
+      const insets = getCurrentOverlaySafeInsets(viewportRect);
+      const selectedRef = current.selection_state.selected_object_refs?.[0] ?? null;
+      const selectedRect = selectedRef ? getObjectWorldRect(current, selectedRef) : null;
+      const nextCamera = selectedRect
+        ? focusCameraOnRect(selectedRect, cameraRef.current.zoom, viewportRect, insets)
+        : current.whiteboard_nodes.length
+          ? fitCameraToNodes(current.whiteboard_nodes, viewportRect, insets)
+          : DEFAULT_CAMERA;
+
+      setCameraState(nextCamera, { persist: false });
+    }
+
+    function onResize() {
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(reframeAfterResize, 120);
+    }
+
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (analyzeTimerRef.current) {
         window.clearTimeout(analyzeTimerRef.current);
@@ -1719,8 +1757,10 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       commitWorkspace(
         (document) =>
           updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
-            x: snapSceneValue(interaction.originChild.x + (pointerScene.x - interaction.originPointerScene.x)),
-            y: snapSceneValue(interaction.originChild.y + (pointerScene.y - interaction.originPointerScene.y))
+            ...clampPhyCanvasChildAttributes(node, interaction.originChild, {
+              x: interaction.originChild.x + (pointerScene.x - interaction.originPointerScene.x),
+              y: interaction.originChild.y + (pointerScene.y - interaction.originPointerScene.y)
+            })
           }),
         { persist: true }
       );
@@ -1744,7 +1784,11 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
             document,
             interaction.nodeId,
             interaction.childId,
-            getResizedChildAttributes(interaction.originChild, interaction.originGeometry, resized)
+            clampPhyCanvasChildAttributes(
+              node,
+              interaction.originChild,
+              getResizedChildAttributes(interaction.originChild, interaction.originGeometry, resized)
+            )
           ),
         { persist: true }
       );
@@ -1764,9 +1808,14 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
       interaction.didMutate = true;
       commitWorkspace(
         (document) =>
-          updatePhyCanvasChild(document, interaction.nodeId, interaction.childId, {
-            rotation: snapSceneValue(nextRotation)
-          }),
+          updatePhyCanvasChild(
+            document,
+            interaction.nodeId,
+            interaction.childId,
+            clampPhyCanvasChildAttributes(node, interaction.originChild, {
+              rotation: nextRotation
+            })
+          ),
         { persist: true }
       );
     }
@@ -2057,6 +2106,13 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           ...clampMarkerPosition(marker.left, marker.top, viewportBounds, overlaySafeInsets)
         }));
   const remoteBusy = remoteMutationState !== "idle";
+  const canSubmitImport =
+    importMode === "text" ? importText.trim().length > 0 : importFile !== null;
+  const importSubmitTitle = canSubmitImport
+    ? "导入并生成建议"
+    : importMode === "text"
+      ? "请先输入题目文本"
+      : "请先选择文件";
   const canTransformSelectedChild =
     !!selectedChild && selectedNode?.kind === "phy_canvas" && !selectedNode.locked && !!selectionGeometry?.canResize;
   const isRotating = activeTransform === "rotate-node" || activeTransform === "rotate-child";
@@ -2292,16 +2348,23 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
             <div className="wb-sidebar__chat">
               <div className="wb-chat-bubble">
-                右侧先保留 AI 侧栏壳体。完整 Tutor 聊天流会在后续版本接入。
+                Tutor 聊天正在接入；目前请用“检查全板/所选”和建议卡片处理反馈。
               </div>
               <div className="wb-chat-input">
                 <input
                   value={chatDraft}
                   onChange={(event) => setChatDraft(event.target.value)}
-                  placeholder="先保留输入壳体"
-                  aria-label="AI 输入壳体"
+                  placeholder="Tutor 聊天即将接入"
+                  aria-label="Tutor 聊天即将接入"
+                  disabled
                 />
-                <button className="wb-icon-button" type="button" title="发送" onClick={handleChatStubSubmit}>
+                <button
+                  className="wb-icon-button"
+                  type="button"
+                  title="Tutor 聊天即将接入"
+                  onClick={handleChatStubSubmit}
+                  disabled
+                >
                   <UiIcon name="send" />
                 </button>
               </div>
@@ -2420,7 +2483,7 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                     <svg
                       className="wb-phy-canvas__svg"
                       viewBox={`0 0 ${node.payload.bounds.width} ${node.payload.bounds.height}`}
-                      preserveAspectRatio="none"
+                      preserveAspectRatio="xMidYMid meet"
                     >
                       {parsePhyCanvasObjects(node).map((item) => {
                         const childSelected = selectedObjectRef === item.objectRef;
@@ -2823,7 +2886,12 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 </label>
               )}
 
-              <button className="wb-primary-button" type="submit" disabled={remoteBusy}>
+              <button
+                className="wb-primary-button"
+                type="submit"
+                disabled={remoteBusy || !canSubmitImport}
+                title={importSubmitTitle}
+              >
                 <UiIcon name="spark" />
                 <span>导入并生成建议</span>
               </button>
@@ -3144,6 +3212,78 @@ function minChildSize(kind: string) {
     default:
       return { w: 48, h: 36 };
   }
+}
+
+function clampPhyCanvasChildAttributes(
+  node: Extract<WhiteboardNode, { kind: "phy_canvas" }>,
+  child: PhyCanvasObject,
+  attributes: Partial<Pick<PhyCanvasObject, "x" | "y" | "w" | "h" | "rotation">>
+) {
+  const bounds = {
+    width: Math.max(1, node.payload.bounds.width),
+    height: Math.max(1, node.payload.bounds.height)
+  };
+  const minimumSize = minChildSize(child.kind);
+  const nextChild: PhyCanvasObject = {
+    ...child,
+    x: attributes.x ?? child.x,
+    y: attributes.y ?? child.y,
+    w: attributes.w ?? child.w,
+    h: attributes.h ?? child.h,
+    rotation: attributes.rotation ?? child.rotation
+  };
+
+  nextChild.w = clamp(nextChild.w, minimumSize.w, bounds.width);
+  nextChild.h = clamp(nextChild.h, minimumSize.h, bounds.height);
+
+  let geometry = getPhyCanvasChildSceneGeometry(nextChild);
+  if ((typeof attributes.w === "number" || typeof attributes.h === "number") && child.kind !== "label") {
+    const fitScale = Math.min(
+      bounds.width / Math.max(geometry.aabb.w, 1),
+      bounds.height / Math.max(geometry.aabb.h, 1),
+      1
+    );
+    if (fitScale < 1) {
+      nextChild.w = Math.max(minimumSize.w, nextChild.w * fitScale);
+      nextChild.h = Math.max(minimumSize.h, nextChild.h * fitScale);
+      geometry = getPhyCanvasChildSceneGeometry(nextChild);
+    }
+  }
+  const dx = clampAabbOffset(geometry.aabb.x, geometry.aabb.x + geometry.aabb.w, bounds.width);
+  const dy = clampAabbOffset(geometry.aabb.y, geometry.aabb.y + geometry.aabb.h, bounds.height);
+  nextChild.x += dx;
+  nextChild.y += dy;
+
+  const nextAttributes: Partial<Record<"x" | "y" | "w" | "h" | "rotation", number>> = {
+    ...attributes,
+    x: snapSceneValue(nextChild.x),
+    y: snapSceneValue(nextChild.y)
+  };
+
+  if (typeof attributes.w === "number" || nextChild.w !== child.w) {
+    nextAttributes.w = snapSceneValue(nextChild.w);
+  }
+  if (typeof attributes.h === "number" || nextChild.h !== child.h) {
+    nextAttributes.h = snapSceneValue(nextChild.h);
+  }
+  if (typeof attributes.rotation === "number") {
+    nextAttributes.rotation = snapSceneValue(nextChild.rotation);
+  }
+
+  return nextAttributes;
+}
+
+function clampAabbOffset(min: number, max: number, limit: number) {
+  if (max - min > limit) {
+    return limit / 2 - (min + max) / 2;
+  }
+  if (min < 0) {
+    return -min;
+  }
+  if (max > limit) {
+    return limit - max;
+  }
+  return 0;
 }
 
 function sameCamera(left: CameraState, right: CameraState) {
