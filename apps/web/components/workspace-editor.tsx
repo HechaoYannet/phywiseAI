@@ -566,6 +566,44 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
   }, [workspace, selectedSuggestionId]);
 
   useEffect(() => {
+    let resizeTimer: number | null = null;
+
+    function reframeAfterResize() {
+      const current = workspaceRef.current;
+      const viewportRect = viewportRef.current?.getBoundingClientRect() ?? null;
+      if (!current || !viewportRect) {
+        return;
+      }
+
+      const insets = getCurrentOverlaySafeInsets(viewportRect);
+      const selectedRef = current.selection_state.selected_object_refs?.[0] ?? null;
+      const selectedRect = selectedRef ? getObjectWorldRect(current, selectedRef) : null;
+      const nextCamera = selectedRect
+        ? focusCameraOnRect(selectedRect, cameraRef.current.zoom, viewportRect, insets)
+        : current.whiteboard_nodes.length
+          ? fitCameraToNodes(current.whiteboard_nodes, viewportRect, insets)
+          : DEFAULT_CAMERA;
+
+      setCameraState(nextCamera, { persist: false });
+    }
+
+    function onResize() {
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+      resizeTimer = window.setTimeout(reframeAfterResize, 120);
+    }
+
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      if (resizeTimer) {
+        window.clearTimeout(resizeTimer);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (analyzeTimerRef.current) {
         window.clearTimeout(analyzeTimerRef.current);
@@ -2068,6 +2106,13 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
           ...clampMarkerPosition(marker.left, marker.top, viewportBounds, overlaySafeInsets)
         }));
   const remoteBusy = remoteMutationState !== "idle";
+  const canSubmitImport =
+    importMode === "text" ? importText.trim().length > 0 : importFile !== null;
+  const importSubmitTitle = canSubmitImport
+    ? "导入并生成建议"
+    : importMode === "text"
+      ? "请先输入题目文本"
+      : "请先选择文件";
   const canTransformSelectedChild =
     !!selectedChild && selectedNode?.kind === "phy_canvas" && !selectedNode.locked && !!selectionGeometry?.canResize;
   const isRotating = activeTransform === "rotate-node" || activeTransform === "rotate-child";
@@ -2303,16 +2348,23 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
 
             <div className="wb-sidebar__chat">
               <div className="wb-chat-bubble">
-                右侧先保留 AI 侧栏壳体。完整 Tutor 聊天流会在后续版本接入。
+                Tutor 聊天正在接入；目前请用“检查全板/所选”和建议卡片处理反馈。
               </div>
               <div className="wb-chat-input">
                 <input
                   value={chatDraft}
                   onChange={(event) => setChatDraft(event.target.value)}
-                  placeholder="先保留输入壳体"
-                  aria-label="AI 输入壳体"
+                  placeholder="Tutor 聊天即将接入"
+                  aria-label="Tutor 聊天即将接入"
+                  disabled
                 />
-                <button className="wb-icon-button" type="button" title="发送" onClick={handleChatStubSubmit}>
+                <button
+                  className="wb-icon-button"
+                  type="button"
+                  title="Tutor 聊天即将接入"
+                  onClick={handleChatStubSubmit}
+                  disabled
+                >
                   <UiIcon name="send" />
                 </button>
               </div>
@@ -2834,7 +2886,12 @@ export function WorkspaceEditor({ workspaceId }: WorkspaceEditorProps) {
                 </label>
               )}
 
-              <button className="wb-primary-button" type="submit" disabled={remoteBusy}>
+              <button
+                className="wb-primary-button"
+                type="submit"
+                disabled={remoteBusy || !canSubmitImport}
+                title={importSubmitTitle}
+              >
                 <UiIcon name="spark" />
                 <span>导入并生成建议</span>
               </button>

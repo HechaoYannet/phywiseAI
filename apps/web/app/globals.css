@@ -2583,6 +2583,12 @@ button:disabled {
   font: inherit;
 }
 
+.wb-chat-input input:disabled {
+  color: var(--wb-muted);
+  background: rgba(255, 255, 255, 0.62);
+  cursor: not-allowed;
+}
+
 .wb-sidebar__collapsed-stack {
   display: grid;
   gap: 12px;
@@ -2605,6 +2611,7 @@ button:disabled {
 
 .wb-viewport {
   position: absolute;
+  z-index: 1;
   inset: 0;
   overflow: hidden;
   touch-action: none;
@@ -3391,6 +3398,13 @@ button:disabled {
   .wb-sidebar.is-collapsed .wb-sidebar__title,
   .wb-sidebar.is-collapsed .wb-sidebar__collapsed-stack {
     display: none;
+  }
+
+  .wb-toast {
+    top: calc(env(safe-area-inset-top) + 124px);
+    bottom: auto;
+    width: calc(100vw - 24px);
+    min-width: 0;
   }
 
   .wb-sheet-backdrop {
